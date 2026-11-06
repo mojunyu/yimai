@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Person;
+use App\Models\SpouseLink;
 use App\Support\EnsuresCurrentTree;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -14,6 +15,7 @@ use Illuminate\Validation\ValidationException;
 /**
  * AC-1: person CRUD.
  * AC-2: father_id/mother_id binding + cycle hard-fail + parent edges on tree JSON.
+ * AC-3: spouse edges on tree JSON (type=spouse with a,b,link_id).
  *
  * Tree JSON (locked field names for AC-4):
  * {
@@ -182,7 +184,20 @@ class PersonController extends Controller
             }
         }
 
-        // Spouse edges deferred to AC-3.
+        $spouseLinks = SpouseLink::query()
+            ->where('tree_id', $root->tree_id)
+            ->orderBy('id')
+            ->get();
+
+        foreach ($spouseLinks as $link) {
+            $edges[] = [
+                'type' => 'spouse',
+                'a' => $link->person_a_id,
+                'b' => $link->person_b_id,
+                'link_id' => $link->id,
+            ];
+        }
+
         return response()->json([
             'root_id' => $root->id,
             'nodes' => $nodes,
