@@ -147,3 +147,4 @@ QA: pass if 不能读写他人 tree 的 persons/links（401/403/404，不得 200
 - Eng path：local Grok Bot scaffold（no Cloud Agent per Boss）。
 - UI defaults（Boss）：单击节点只开 sheet、不换根；不做「我」标记；父母拆两个入口；配偶 start/end/note UI 全藏；tree JSON 字段名按本 cut 锁定。
 - 仓库已钉死：`owner/repo = mojunyu/yimai`（SoT：https://github.com/mojunyu/yimai/blob/main/docs/prd/yimai.md）。
+- AC-5/AC-6 Feature proof：见 `docs/qa/ac-5-6-evidence.md`（PersonAc5Test + TreeIsolationAc6Test）。
