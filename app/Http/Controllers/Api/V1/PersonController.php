@@ -7,11 +7,13 @@ use App\Models\Person;
 use App\Support\EnsuresCurrentTree;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 /**
- * AC-1: person CRUD. Tree JSON (AC-4) and deep parent/spouse rules stay later.
+ * AC-1: person CRUD.
+ * AC-2: father_id/mother_id binding + cycle hard-fail + parent edges on tree JSON.
  *
  * Tree JSON (locked field names for AC-4):
  * {
@@ -66,19 +68,21 @@ class PersonController extends Controller
         $person = $this->findInCurrentTree($request, $id);
         $data = $this->validatedPersonAttributes($request, partial: true);
 
-        // AC-2 parent binding can land later; accept fields if present but keep AC-1 focused.
         if ($request->exists('father_id') || $request->exists('mother_id')) {
             $parentData = $request->validate([
                 'father_id' => ['nullable', 'integer'],
                 'mother_id' => ['nullable', 'integer'],
             ]);
-            foreach (['father_id', 'mother_id'] as $key) {
-                if (! array_key_exists($key, $parentData)) {
-                    continue;
-                }
-                $parentId = $parentData[$key];
+
+            $nextFather = array_key_exists('father_id', $parentData)
+                ? $parentData['father_id']
+                : $person->father_id;
+            $nextMother = array_key_exists('mother_id', $parentData)
+                ? $parentData['mother_id']
+                : $person->mother_id;
+
+            foreach (['father_id' => $nextFather, 'mother_id' => $nextMother] as $key => $parentId) {
                 if ($parentId === null) {
-                    $data[$key] = null;
                     continue;
                 }
                 if ((int) $parentId === (int) $person->id) {
@@ -95,7 +99,19 @@ class PersonController extends Controller
                         $key => ['Parent must belong to the same tree.'],
                     ]);
                 }
-                $data[$key] = $parentId;
+            }
+
+            $this->assertNoParentCycle(
+                $person,
+                $nextFather !== null ? (int) $nextFather : null,
+                $nextMother !== null ? (int) $nextMother : null,
+            );
+
+            if (array_key_exists('father_id', $parentData)) {
+                $data['father_id'] = $parentData['father_id'];
+            }
+            if (array_key_exists('mother_id', $parentData)) {
+                $data['mother_id'] = $parentData['mother_id'];
             }
         }
 
@@ -128,16 +144,112 @@ class PersonController extends Controller
         return response()->json(null, 204);
     }
 
-    public function tree(string $id): JsonResponse
+    public function tree(Request $request, string $id): JsonResponse
     {
-        // AC-4 stub — unlock after AC-1…AC-3
+        $root = $this->findInCurrentTree($request, $id);
+
+        /** @var Collection<int, Person> $persons */
+        $persons = Person::query()
+            ->where('tree_id', $root->tree_id)
+            ->orderBy('generation')
+            ->orderBy('id')
+            ->get();
+
+        $nodes = $persons->map(fn (Person $p) => [
+            'id' => $p->id,
+            'name' => $p->name,
+            'gender' => $p->gender,
+            'generation' => $p->generation,
+            'birth_year' => $p->birth_year,
+            'death_year' => $p->death_year,
+        ])->values()->all();
+
+        $edges = [];
+        foreach ($persons as $p) {
+            if ($p->father_id !== null) {
+                $edges[] = [
+                    'type' => 'parent',
+                    'from' => $p->father_id,
+                    'to' => $p->id,
+                ];
+            }
+            if ($p->mother_id !== null) {
+                $edges[] = [
+                    'type' => 'parent',
+                    'from' => $p->mother_id,
+                    'to' => $p->id,
+                ];
+            }
+        }
+
+        // Spouse edges deferred to AC-3.
         return response()->json([
-            'message' => 'stub: GET /api/v1/persons/{id}/tree',
-            'todo' => 'AC-4 tree JSON',
-            'root_id' => (int) $id,
-            'nodes' => [],
-            'edges' => [],
-        ], 501);
+            'root_id' => $root->id,
+            'nodes' => $nodes,
+            'edges' => $edges,
+        ]);
+    }
+
+    /**
+     * Hard-fail if assigning the proposed parents would create a parent-link cycle.
+     */
+    private function assertNoParentCycle(Person $person, ?int $fatherId, ?int $motherId): void
+    {
+        $relatives = Person::query()
+            ->where('tree_id', $person->tree_id)
+            ->get(['id', 'father_id', 'mother_id']);
+
+        $fathers = [];
+        $mothers = [];
+        foreach ($relatives as $row) {
+            $fathers[$row->id] = $row->father_id !== null ? (int) $row->father_id : null;
+            $mothers[$row->id] = $row->mother_id !== null ? (int) $row->mother_id : null;
+        }
+
+        $fathers[$person->id] = $fatherId;
+        $mothers[$person->id] = $motherId;
+
+        foreach (['father_id' => $fatherId, 'mother_id' => $motherId] as $key => $parentId) {
+            if ($parentId === null) {
+                continue;
+            }
+            // Cycle if walking up from the proposed parent reaches the child.
+            if ($this->ancestorWalkReaches($parentId, $person->id, $fathers, $mothers)) {
+                throw ValidationException::withMessages([
+                    $key => ['Parent assignment would create a cycle.'],
+                ]);
+            }
+        }
+    }
+
+    /**
+     * @param  array<int, int|null>  $fathers
+     * @param  array<int, int|null>  $mothers
+     */
+    private function ancestorWalkReaches(int $startId, int $targetId, array $fathers, array $mothers): bool
+    {
+        $seen = [];
+        $stack = [$startId];
+
+        while ($stack !== []) {
+            $id = array_pop($stack);
+            if ($id === $targetId) {
+                return true;
+            }
+            if (isset($seen[$id])) {
+                continue;
+            }
+            $seen[$id] = true;
+
+            if (! empty($fathers[$id])) {
+                $stack[] = $fathers[$id];
+            }
+            if (! empty($mothers[$id])) {
+                $stack[] = $mothers[$id];
+            }
+        }
+
+        return false;
     }
 
     /**
