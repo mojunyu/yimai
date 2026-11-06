@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" width="1280" height="800">
+  <rect width="1280" height="800" fill="#f5f5f5"/>
+  <!-- TopBar -->
+  <rect x="0" y="0" width="1280" height="56" fill="#ffffff" stroke="#cccccc"/>
+  <text x="24" y="36" font-family="Noto Sans CJK SC, sans-serif" font-size="18" font-weight="600" fill="#111111">一脉</text>
+  <rect x="1120" y="12" width="136" height="32" rx="4" fill="#111111"/>
+  <text x="1188" y="33" font-family="Noto Sans CJK SC, sans-serif" font-size="13" fill="#ffffff" text-anchor="middle">添加成员</text>
+  <!-- Dimmed canvas hint -->
+  <rect x="0" y="56" width="840" height="744" fill="#e8e8e8"/>
+  <rect x="200" y="200" width="100" height="64" rx="4" fill="#ffffff" stroke="#aaaaaa"/>
+  <text x="250" y="238" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#888888" text-anchor="middle">节点…</text>
+  <rect x="360" y="200" width="100" height="64" rx="4" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="410" y="238" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#333333" text-anchor="middle">张三</text>
+  <!-- Overlay shade -->
+  <rect x="0" y="56" width="840" height="744" fill="#000000" opacity="0.15"/>
+  <!-- Person sheet -->
+  <rect x="840" y="56" width="440" height="744" fill="#ffffff" stroke="#cccccc"/>
+  <!-- Sheet header -->
+  <text x="864" y="96" font-family="Noto Sans CJK SC, sans-serif" font-size="16" font-weight="600" fill="#111111">编辑 · 张三</text>
+  <text x="1248" y="96" font-family="Noto Sans CJK SC, sans-serif" font-size="18" fill="#666666" text-anchor="end">×</text>
+  <line x1="840" y1="112" x2="1280" y2="112" stroke="#e0e0e0"/>
+  <!-- Fields -->
+  <text x="864" y="148" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#666666">姓名 *</text>
+  <rect x="864" y="156" width="392" height="36" rx="4" fill="#ffffff" stroke="#cccccc"/>
+  <text x="876" y="179" font-family="Noto Sans CJK SC, sans-serif" font-size="14" fill="#111111">张三</text>
+  <text x="864" y="220" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#666666">性别</text>
+  <rect x="864" y="228" width="392" height="36" rx="4" fill="#ffffff" stroke="#cccccc"/>
+  <text x="876" y="251" font-family="Noto Sans CJK SC, sans-serif" font-size="14" fill="#111111">男 ▾</text>
+  <text x="864" y="292" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#666666">世代</text>
+  <rect x="864" y="300" width="392" height="36" rx="4" fill="#ffffff" stroke="#cccccc"/>
+  <text x="876" y="323" font-family="Noto Sans CJK SC, sans-serif" font-size="14" fill="#111111">2</text>
+  <text x="864" y="364" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#666666">生年</text>
+  <rect x="864" y="372" width="184" height="36" rx="4" fill="#ffffff" stroke="#cccccc"/>
+  <text x="876" y="395" font-family="Noto Sans CJK SC, sans-serif" font-size="14" fill="#111111">1990</text>
+  <text x="1072" y="364" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#666666">卒年（空=在世）</text>
+  <rect x="1072" y="372" width="184" height="36" rx="4" fill="#ffffff" stroke="#cccccc"/>
+  <text x="1084" y="395" font-family="Noto Sans CJK SC, sans-serif" font-size="14" fill="#999999">在世</text>
+  <!-- Relations -->
+  <text x="864" y="440" font-family="Noto Sans CJK SC, sans-serif" font-size="13" font-weight="600" fill="#111111">父母</text>
+  <rect x="864" y="452" width="120" height="28" rx="14" fill="#f0f0f0" stroke="#cccccc"/>
+  <text x="924" y="471" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#111111" text-anchor="middle">父 · 张父 ×</text>
+  <rect x="996" y="452" width="120" height="28" rx="14" fill="#f0f0f0" stroke="#cccccc"/>
+  <text x="1056" y="471" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#111111" text-anchor="middle">母 · 李母 ×</text>
+  <rect x="1128" y="452" width="96" height="28" rx="4" fill="#ffffff" stroke="#111111"/>
+  <text x="1176" y="471" font-family="Noto Sans CJK SC, sans-serif" font-size="11" fill="#111111" text-anchor="middle">绑定父母</text>
+  <text x="864" y="520" font-family="Noto Sans CJK SC, sans-serif" font-size="13" font-weight="600" fill="#111111">配偶</text>
+  <rect x="864" y="532" width="88" height="28" rx="14" fill="#f0f0f0" stroke="#cccccc"/>
+  <text x="908" y="551" font-family="Noto Sans CJK SC, sans-serif" font-size="12" fill="#111111" text-anchor="middle">王五 ×</text>
+  <rect x="964" y="532" width="96" height="28" rx="4" fill="#ffffff" stroke="#111111"/>
+  <text x="1012" y="551" font-family="Noto Sans CJK SC, sans-serif" font-size="11" fill="#111111" text-anchor="middle">绑定配偶</text>
+  <!-- Footer -->
+  <line x1="840" y1="720" x2="1280" y2="720" stroke="#e0e0e0"/>
+  <rect x="864" y="740" width="72" height="32" rx="4" fill="#ffffff" stroke="#cc0000"/>
+  <text x="900" y="761" font-family="Noto Sans CJK SC, sans-serif" font-size="13" fill="#cc0000" text-anchor="middle">删除</text>
+  <rect x="1056" y="740" width="72" height="32" rx="4" fill="#ffffff" stroke="#cccccc"/>
+  <text x="1092" y="761" font-family="Noto Sans CJK SC, sans-serif" font-size="13" fill="#333333" text-anchor="middle">取消</text>
+  <rect x="1144" y="740" width="96" height="32" rx="4" fill="#111111"/>
+  <text x="1192" y="761" font-family="Noto Sans CJK SC, sans-serif" font-size="13" fill="#ffffff" text-anchor="middle">保存</text>
+  <text x="24" y="780" font-family="Noto Sans CJK SC, sans-serif" font-size="11" fill="#999999">Person sheet · edit · cut 2026-11-06 · 1280×800</text>
+</svg>

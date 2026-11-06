@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" width="1280" height="800">
+  <rect width="1280" height="800" fill="#f5f5f5"/>
+  <!-- TopBar -->
+  <rect x="0" y="0" width="1280" height="56" fill="#ffffff" stroke="#cccccc"/>
+  <text x="24" y="36" font-family="Noto Sans CJK SC, sans-serif" font-size="18" font-weight="600" fill="#111111">一脉</text>
+  <rect x="1120" y="12" width="136" height="32" rx="4" fill="#111111"/>
+  <text x="1188" y="33" font-family="Noto Sans CJK SC, sans-serif" font-size="13" fill="#ffffff" text-anchor="middle">添加成员</text>
+  <!-- Canvas area -->
+  <rect x="0" y="56" width="1280" height="744" fill="#f5f5f5" stroke="#e0e0e0"/>
+  <!-- Empty state (centered, no illustration) -->
+  <rect x="420" y="280" width="440" height="200" rx="4" fill="#ffffff" stroke="#cccccc"/>
+  <text x="640" y="340" font-family="Noto Sans CJK SC, sans-serif" font-size="18" font-weight="600" fill="#111111" text-anchor="middle">还没有家族成员</text>
+  <text x="640" y="372" font-family="Noto Sans CJK SC, sans-serif" font-size="13" fill="#666666" text-anchor="middle">添加第一位成员开始这棵树</text>
+  <rect x="560" y="400" width="160" height="36" rx="4" fill="#111111"/>
+  <text x="640" y="423" font-family="Noto Sans CJK SC, sans-serif" font-size="13" fill="#ffffff" text-anchor="middle">添加成员</text>
+  <!-- Label -->
+  <text x="24" y="780" font-family="Noto Sans CJK SC, sans-serif" font-size="11" fill="#999999">Tree · empty · cut 2026-11-06 · 1280×800</text>
+</svg>
