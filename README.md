@@ -3,13 +3,14 @@
 家族树与家庭成员分支记录 — MVP（binding cut **2026-11-06 APPROVED**）。
 
 Living SoT: [`docs/prd/yimai.md`](docs/prd/yimai.md)  
-UI handoff: [`docs/design/`](docs/design/)
+UI handoff: [`docs/design/`](docs/design/)  
+Frontend (AC-4): [`frontend/README.md`](frontend/README.md)
 
 ## Stack
 
-- Backend: Laravel 13 + Sanctum (`/api/v1`)
+- Backend: Laravel + Sanctum (`/api/v1`)
 - DB: SQLite by default (`.env` → `DB_CONNECTION=sqlite`)
-- Frontend: TBD (consume `GET /persons/{id}/tree` with D3/OrgChart; no client-side relationship algorithm)
+- Frontend: static D3 app under `frontend/` (served at `/app/`), consumes `GET /persons/{id}/tree` only
 
 ## Requirements
 
@@ -24,15 +25,19 @@ cp .env.example .env   # if needed
 php artisan key:generate
 touch database/database.sqlite
 php artisan migrate
+php artisan yimai:demo --fresh   # demo user + 3-gen fixture + token
 php artisan serve
 ```
 
-API base: `http://127.0.0.1:8000/api/v1` (requires Sanctum auth token).
+- API: `http://127.0.0.1:8000/api/v1`
+- App: `http://127.0.0.1:8000/app/`
+- Demo login: `demo@yimai.test` / `password`
 
-## API surface (stubs → 501 until AC implemented)
+## API surface
 
 | Method | Path | AC |
 | --- | --- | --- |
+| POST | `/auth/login` | demo auth |
 | GET | `/trees/current` | AC-1 |
 | GET/POST | `/persons` | AC-1 |
 | GET/PATCH/DELETE | `/persons/{id}` | AC-1 / AC-2 / AC-5 |
@@ -53,6 +58,8 @@ Tree JSON field names are **locked** (AC-4):
 }
 ```
 
+3-gen fixture expected counts: **nodes=5 · parent=4 · spouse=2** (see `App\Support\ThreeGenerationFixture`).
+
 ## Unlock order
 
 AC-1 → AC-2 → AC-3 → AC-4 → AC-5 → AC-6
@@ -65,8 +72,13 @@ AC-1 → AC-2 → AC-3 → AC-4 → AC-5 → AC-6
 - Hide spouse `start_year` / `end_year` / `note` in UI
 - Frontend must trust `/persons/{id}/tree` only
 
+## Tests
+
+```bash
+php artisan test --filter=TreeAc4Test
+php artisan test
+```
+
 ## Eng notes
 
-- Scaffolded locally by Grok Bot (**no Cursor Cloud Agent**).
-- Controllers under `app/Http/Controllers/Api/V1/` currently return HTTP 501 stubs.
-- Next: implement **AC-1** (member CRUD + ensure current tree on first use).
+- Scaffolded / implemented locally by Grok Bot (**no Cursor Cloud Agent**).

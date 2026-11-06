@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>一脉 — 家族树（AC-4）</title>
+  <link rel="stylesheet" href="./css/app.css" />
+  <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">一脉</div>
+    <div class="stats" id="stats">nodes: — · parent: — · spouse: —</div>
+    <div class="auth">
+      <input id="email" type="email" placeholder="email" value="demo@yimai.test" />
+      <input id="password" type="password" placeholder="password" value="password" />
+      <button type="button" id="btn-login">登录</button>
+      <button type="button" id="btn-reload" disabled>刷新树</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="canvas-wrap">
+      <div id="empty" class="empty hidden">
+        <p>还没有家族成员</p>
+        <p class="hint">登录后加载演示树，或通过 API 添加第一位成员。</p>
+      </div>
+      <svg id="tree-canvas" aria-label="家族树画布"></svg>
+    </section>
+
+    <aside id="sheet" class="sheet hidden" aria-live="polite">
+      <div class="sheet-head">
+        <h2 id="sheet-title">成员</h2>
+        <button type="button" id="btn-close-sheet" class="ghost">关闭</button>
+      </div>
+      <dl id="sheet-body" class="sheet-body"></dl>
+      <div class="sheet-actions">
+        <button type="button" id="btn-set-root">设为根</button>
+      </div>
+      <p class="sheet-note">单击节点只打开本面板，不会换根。换根请点「设为根」。</p>
+    </aside>
+  </main>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
