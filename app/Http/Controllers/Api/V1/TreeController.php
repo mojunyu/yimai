@@ -3,20 +3,22 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Support\EnsuresCurrentTree;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
-/**
- * Stub for AC scaffold. Real current-tree logic lands with AC-1.
- */
 class TreeController extends Controller
 {
+    use EnsuresCurrentTree;
+
     public function current(Request $request): JsonResponse
     {
-        // TODO(AC-1): ensure user has a tree; return { id, title, owner_user_id }
+        $tree = $this->currentTreeFor($request->user());
+
         return response()->json([
-            'message' => 'stub: GET /api/v1/trees/current',
-            'todo' => 'Return current user tree metadata',
-        ], 501);
+            'id' => $tree->id,
+            'title' => $tree->title,
+            'owner_user_id' => $tree->owner_user_id,
+        ]);
     }
 }

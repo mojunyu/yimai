@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Person extends Model
 {
+    protected $table = 'persons';
+
     protected $fillable = [
         'tree_id',
         'name',
