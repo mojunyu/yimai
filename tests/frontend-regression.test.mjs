@@ -27,7 +27,7 @@ const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR
   : path.resolve(APP_ROOT, 'artifacts');
 
 /** Must match results logged by the ordered suite. Aborting early fails. */
-const EXPECTED_TEST_COUNT = 25;
+const EXPECTED_TEST_COUNT = 31;
 
 let browser;
 let page;
@@ -236,12 +236,23 @@ async function installFetchHooks() {
     window.__yimaiFailNextBind = false;
     window.__yimaiFailNextPersonsGet = false;
     window.__yimaiFailNextTreeGet = false;
+    window.__yimaiDelayTreeMs = 0;
+    window.__yimaiTreeDelayArmed = false;
+    window.__yimaiTreeDelayActive = false;
+    window.__yimaiLoseNextPersonPostResponse = false;
+    window.__yimaiFailNextPersonGetId = null;
     window.__yimaiPostPersonCount = 0;
     window.fetch = async (input, init = {}) => {
       const url = String(input);
       const method = (init.method || 'GET').toUpperCase();
       if (method === 'POST' && /\/api\/v1\/persons\/?$/.test(url.replace(/\?.*$/, ''))) {
         window.__yimaiPostPersonCount += 1;
+        if (window.__yimaiLoseNextPersonPostResponse) {
+          window.__yimaiLoseNextPersonPostResponse = false;
+          // Backend commits; client never receives the body (unknown outcome).
+          await window.__yimaiOrigFetch(input, init);
+          throw new TypeError('Failed to fetch (simulated lost create response)');
+        }
       }
       if (
         window.__yimaiFailNextBind
@@ -266,15 +277,33 @@ async function installFetchHooks() {
         });
       }
       if (
-        window.__yimaiFailNextTreeGet
+        window.__yimaiFailNextPersonGetId
         && method === 'GET'
-        && /\/api\/v1\/persons\/\d+\/tree/.test(url)
+        && new RegExp(`/api/v1/persons/${window.__yimaiFailNextPersonGetId}$`).test(url.replace(/\?.*$/, ''))
       ) {
-        window.__yimaiFailNextTreeGet = false;
-        return new Response(JSON.stringify({ message: 'forced tree load failure' }), {
-          status: 500,
+        window.__yimaiFailNextPersonGetId = null;
+        return new Response(JSON.stringify({ message: 'forced person read failure' }), {
+          status: 503,
           headers: { 'Content-Type': 'application/json' },
         });
+      }
+      if (
+        method === 'GET'
+        && /\/api\/v1\/persons\/\d+\/tree/.test(url)
+      ) {
+        if (window.__yimaiTreeDelayArmed && window.__yimaiDelayTreeMs > 0) {
+          window.__yimaiTreeDelayArmed = false;
+          window.__yimaiTreeDelayActive = true;
+          await new Promise((r) => setTimeout(r, window.__yimaiDelayTreeMs));
+          window.__yimaiTreeDelayActive = false;
+        }
+        if (window.__yimaiFailNextTreeGet) {
+          window.__yimaiFailNextTreeGet = false;
+          return new Response(JSON.stringify({ message: 'forced tree load failure' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
       }
       return window.__yimaiOrigFetch(input, init);
     };
@@ -287,6 +316,28 @@ async function armBindFail() {
 
 async function armTreeLoadFail() {
   await page.evaluate(() => { window.__yimaiFailNextTreeGet = true; });
+}
+
+async function armTreeLoadDelay(ms = 8000) {
+  await page.evaluate((delay) => {
+    window.__yimaiDelayTreeMs = delay;
+    window.__yimaiTreeDelayArmed = true;
+  }, ms);
+}
+
+async function armLoseNextPersonPostResponse() {
+  await page.evaluate(() => { window.__yimaiLoseNextPersonPostResponse = true; });
+}
+
+async function armPersonGetFail(id) {
+  await page.evaluate((pid) => { window.__yimaiFailNextPersonGetId = String(pid); }, id);
+}
+
+async function readRecovery() {
+  return page.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem('yimai_add_recovery') || 'null'); }
+    catch (_) { return null; }
+  });
 }
 
 async function treeSnapshot() {
@@ -916,6 +967,294 @@ async function testIdempotentSameFatherBind() {
   );
 }
 
+async function testIdempotentSameMotherBind() {
+  await selectNodeByName('孩子甲');
+  const before = await personByNameViaApi('孩子甲');
+  const countBefore = await personCountViaApi();
+  const snapBefore = await treeSnapshot();
+  await page.click('button[data-kin="mother"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.evaluate(() => {
+    const sel = document.getElementById('add-existing');
+    const opt = Array.from(sel.options).find((o) => o.textContent.includes('母亲甲'));
+    if (!opt) throw new Error('母亲甲 missing');
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await submitAddForm();
+  await sleep(800);
+  const after = await personByNameViaApi('孩子甲');
+  const countAfter = await personCountViaApi();
+  const snapAfter = await treeSnapshot();
+  const errHidden = await page.$eval('#add-error', (el) => el.classList.contains('hidden') || !el.textContent);
+  log(
+    'Idempotent same-mother bind does not conflict',
+    Number(after.mother_id) === Number(before.mother_id)
+      && countAfter === countBefore
+      && errHidden
+      && JSON.stringify(snapBefore.parentEdges) === JSON.stringify(snapAfter.parentEdges)
+      && snapBefore.stats === snapAfter.stats,
+    `mother_id=${after?.mother_id}, count ${countBefore}->${countAfter}`,
+  );
+}
+
+async function testExistingPersonOccupiedFatherSlotBlocked() {
+  // Symmetric to mother: select another existing person into an occupied father slot.
+  await selectNodeByName('孩子甲');
+  const before = await personByNameViaApi('孩子甲');
+  const fatherA = await personByNameViaApi('父亲甲');
+  const countBefore = await personCountViaApi();
+  const snapBefore = await treeSnapshot();
+  // Ensure 父亲乙 exists as an alternate existing person without binding as father.
+  await selectNodeByName('孩子甲');
+  await addKin('son', '旁系儿子');
+  await sleep(700);
+  const decoy = await personByNameViaApi('旁系儿子');
+  await selectNodeByName('孩子甲');
+  await page.click('button[data-kin="father"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.evaluate((decoyName) => {
+    const sel = document.getElementById('add-existing');
+    const opt = Array.from(sel.options).find((o) => o.textContent.includes(decoyName));
+    if (!opt) throw new Error(`${decoyName} missing for occupied father existing bind`);
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }, '旁系儿子');
+  await submitAddForm();
+  await sleep(800);
+  const err = await page.$eval('#add-error', (el) => el.textContent);
+  const after = await personByNameViaApi('孩子甲');
+  const countAfter = await personCountViaApi();
+  const snapAfter = await treeSnapshot();
+  const ok = err.includes('已经记过父亲')
+    && Number(after.father_id) === Number(fatherA.id)
+    && Number(after.father_id) === Number(before.father_id)
+    && countAfter === countBefore + 1 // only the decoy son from setup
+    && decoy
+    && snapBefore.parentEdges.every((e) => snapAfter.parentEdges.includes(e));
+  log(
+    'Existing-person occupied father slot blocked; ids/edges preserved',
+    ok,
+    `err=${err.slice(0, 40)}, father ${before.father_id}->${after.father_id}, count ${countBefore}->${countAfter}`,
+  );
+}
+
+async function testRefreshDuringDisplayLoadKeepsIdentity() {
+  // Depth counterexample window: delay tree GET, refresh WHILE unresolved — must keep id.
+  const auth = phpCreateUser({ withPerson: true, personName: '中断锚点', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('中断锚点');
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  await page.click('button[data-kin="son"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '中断儿子');
+  await armTreeLoadDelay(10000);
+  await submitAddForm();
+
+  let recoveryDuring = null;
+  let delaySeen = false;
+  const deadline = Date.now() + 7000;
+  while (Date.now() < deadline) {
+    const snap = await page.evaluate(() => ({
+      active: Boolean(window.__yimaiTreeDelayActive),
+      recovery: localStorage.getItem('yimai_add_recovery'),
+      posts: window.__yimaiPostPersonCount,
+    }));
+    if (snap.active) delaySeen = true;
+    if (snap.active && snap.recovery) {
+      recoveryDuring = JSON.parse(snap.recovery);
+      break;
+    }
+    await sleep(40);
+  }
+  const personsMid = (await personsViaApi()).filter((p) => p.name === '中断儿子');
+  const postsMid = await page.evaluate(() => window.__yimaiPostPersonCount);
+
+  await page.reload({ waitUntil: 'networkidle0' });
+  await sleep(900);
+  const recoveryAfter = await readRecovery();
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  // Resume should complete without a second create.
+  if (recoveryAfter?.kin === 'son') {
+    await selectNodeByName('中断锚点');
+    await page.click('button[data-kin="son"]');
+    await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  } else if (recoveryAfter?.pendingPersonId) {
+    await page.click('#btn-add');
+  }
+  await submitAddForm();
+  await sleep(1200);
+  const postsAfter = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const same = (await personsViaApi()).filter((p) => p.name === '中断儿子');
+  const ok = delaySeen
+    && recoveryDuring
+    && String(recoveryDuring.pendingPersonId) === String(personsMid[0]?.id)
+    && recoveryAfter
+    && String(recoveryAfter.pendingPersonId) === String(personsMid[0]?.id)
+    && postsMid === 1
+    && postsAfter === 0
+    && same.length === 1
+    && Number(same[0].father_id) === Number(auth.personId);
+  await screenshot('recovery-refresh-during-display-load.png');
+  log(
+    'Refresh during unresolved display load keeps exact id (one POST)',
+    ok,
+    `delaySeen=${delaySeen}, midId=${personsMid[0]?.id}, afterId=${recoveryAfter?.pendingPersonId}, posts ${postsMid}->${postsAfter}, count=${same.length}`,
+  );
+}
+
+async function testSiblingMissingParentKeepsRecoveryNotice() {
+  const auth = phpCreateUser({ withPerson: true, personName: '无父母锚', gender: 'male' });
+  // Build partial-save pending on a different branch person first.
+  const seed = await page.evaluate(async (a) => {
+    const headers = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${a.token}`,
+    };
+    const child = await fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: '待绑孩子', gender: 'male', generation: 2 }),
+    }).then((r) => r.json());
+    return child;
+  }, auth);
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await page.evaluate((payload) => {
+    localStorage.setItem('yimai_add_recovery', JSON.stringify(payload));
+  }, {
+    userId: String(auth.userId),
+    treeId: String(auth.treeId),
+    pendingPersonId: seed.id,
+    kin: 'son',
+    relation: 'child',
+    anchorId: Number(auth.personId),
+    parentRole: 'father',
+    name: '待绑孩子',
+    phase: 'bind_failed',
+    message: '人已记下，关系未保存：forced bind failure for regression test',
+  });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('无父母锚');
+  await page.click('button[data-kin="younger_brother"]');
+  await sleep(400);
+  const sheetErr = await page.$eval('#sheet-error', (el) => el.textContent);
+  const recovery = await readRecovery();
+  const ok = sheetErr.includes('父亲或母亲')
+    && sheetErr.includes('人已记下，关系未保存')
+    && recovery
+    && String(recovery.pendingPersonId) === String(seed.id);
+  await screenshot('recovery-sibling-missing-parent-dual.png');
+  log(
+    'Sibling missing-parent shows prerequisite AND recovery notice',
+    ok,
+    `sheet=${sheetErr.slice(0, 80)}, pending=${recovery?.pendingPersonId}`,
+  );
+}
+
+async function testLostCreateResponseNoSecondPost() {
+  const auth = phpCreateUser({ withPerson: true, personName: '丢包锚点', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('丢包锚点');
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  await page.click('button[data-kin="daughter"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '丢包女儿');
+  await armLoseNextPersonPostResponse();
+  await submitAddForm();
+  await sleep(1200);
+  const err1 = await page.$eval('#add-error', (el) => el.textContent);
+  const recovery1 = await readRecovery();
+  const posts1 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const created = (await personsViaApi()).filter((p) => p.name === '丢包女儿');
+  // Retry: must reconcile without second POST; adopt committed id and finish bind.
+  await submitAddForm();
+  await sleep(1200);
+  const posts2 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const after = (await personsViaApi()).filter((p) => p.name === '丢包女儿');
+  const ok = err1.includes('不确定')
+    && recovery1
+    && (recovery1.phase === 'create_uncertain' || recovery1.phase === 'created_unbound' || recovery1.phase === 'display_load_pending' || recovery1.phase === 'display_load_failed' || !recovery1)
+    && posts1 === 1
+    && posts2 === 1 // still one total — second submit must not POST again
+    && created.length === 1
+    && after.length === 1
+    && String(after[0].id) === String(created[0].id)
+    && Number(after[0].father_id) === Number(auth.personId);
+  await screenshot('recovery-lost-create-response.png');
+  log(
+    'Lost create response keeps count stable without second POST',
+    ok,
+    `posts ${posts1}->${posts2}, ids=${after.map((p) => p.id).join(',')}, phase=${recovery1?.phase}, err=${err1.slice(0, 40)}`,
+  );
+}
+
+async function testPendingGetFailFallsBackToListWithoutClear() {
+  // Verifies d9ff844 semantics (not a rewrite): single GET-by-id failure does not
+  // clear recovery; loadPersons fallback finds the id. Clear only if list lacks id.
+  const auth = phpCreateUser({ withPerson: true, personName: '读失败锚', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  const child = await page.evaluate(async (a) => {
+    const headers = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${a.token}`,
+    };
+    return fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: '待读孩子', gender: 'female', generation: 2 }),
+    }).then((r) => r.json());
+  }, auth);
+  await page.evaluate((payload) => {
+    localStorage.setItem('yimai_add_recovery', JSON.stringify(payload));
+  }, {
+    userId: String(auth.userId),
+    treeId: String(auth.treeId),
+    pendingPersonId: child.id,
+    kin: 'daughter',
+    relation: 'child',
+    anchorId: Number(auth.personId),
+    parentRole: 'father',
+    name: '待读孩子',
+    phase: 'bind_failed',
+    message: '人已记下，关系未保存',
+  });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  await selectNodeByName('读失败锚');
+  await page.click('button[data-kin="daughter"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await armPersonGetFail(child.id);
+  await submitAddForm();
+  await sleep(1200);
+  const posts = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const after = (await personsViaApi()).filter((p) => p.name === '待读孩子');
+  const recovery = await readRecovery();
+  // Fallback list found the person → bind/display can complete; no second POST;
+  // recovery must not have been cleared solely by the failed GET-by-id.
+  const ok = posts === 0
+    && after.length === 1
+    && String(after[0].id) === String(child.id)
+    && Number(after[0].father_id) === Number(auth.personId)
+    && (recovery == null || String(recovery.pendingPersonId) === String(child.id));
+  log(
+    'Pending GET-by-id failure falls back to list; no clear/re-add',
+    ok,
+    `posts=${posts}, id=${after[0]?.id}, father=${after[0]?.father_id}, recovery=${recovery?.pendingPersonId ?? 'cleared-after-success'}`,
+  );
+}
+
 async function testApiRejectsParentOverwrite() {
   // Direct API check (backend guard), not only UI.
   const auth = phpCreateUser({ withPerson: true, personName: 'API孩子', gender: 'male' });
@@ -1072,9 +1411,15 @@ async function runAllTests() {
     testPartialCreateBindFailure,
     testPartialRecoverySurvivesRefreshAndRetry,
     testPostSaveLoadFailureRetryStable,
+    testRefreshDuringDisplayLoadKeepsIdentity,
+    testSiblingMissingParentKeepsRecoveryNotice,
+    testLostCreateResponseNoSecondPost,
+    testPendingGetFailFallsBackToListWithoutClear,
     testDoubleSubmitDoesNotDuplicate,
     testParentOverwriteBlockedFatherAndMother,
     testIdempotentSameFatherBind,
+    testIdempotentSameMotherBind,
+    testExistingPersonOccupiedFatherSlotBlocked,
     testApiRejectsParentOverwrite,
   ];
 

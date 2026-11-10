@@ -39,6 +39,7 @@ const state = {
 
 const PARTIAL_SAVE_MSG = '人已记下，关系未保存';
 const DISPLAY_LOAD_FAIL_MSG = '人已记下且关系已保存，但画面没有刷新成功。请再点记下或重新载入，不会重复添加。';
+const CREATE_UNCERTAIN_MSG = '刚才的记下结果还不确定（可能已保存但回信丢失）。请先重新载入名单；若已出现请选择「已经在谱里」的那位再继续。确认之前不会再次新建。';
 
 const KIN = {
   father: { relation: 'father', gender: 'male', word: '父亲' },
@@ -324,6 +325,15 @@ async function loadPersons() {
 
 async function fetchPersonById(id) {
   return api(`/persons/${id}`);
+}
+
+function newClientOpId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return `op-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function isCreateUnresolvedPhase(phase) {
+  return phase === 'create_inflight' || phase === 'create_uncertain';
 }
 
 function syncRootWithPersons() {
@@ -630,11 +640,19 @@ function startAddForKin(kinKey) {
   const kin = KIN[kinKey];
   const anchor = findPerson(state.selectedId);
   if (!kin || !anchor) {
-    showError(el.sheetError, '请先在树上点一位当前人，再选择要添加的关系。');
+    const base = '请先在树上点一位当前人，再选择要添加的关系。';
+    const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
+    showError(el.sheetError, rec ? `${base} ${recoveryMessage(rec)}` : base);
     return;
   }
   if (kin.relation === 'sibling' && !hasKnownParent(anchor)) {
-    showError(el.sheetError, missingParentsMessage(anchor));
+    // Do not erase durable recovery guidance when explaining the sibling prerequisite.
+    const missing = missingParentsMessage(anchor);
+    const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
+    showError(
+      el.sheetError,
+      rec ? `${missing} ${recoveryMessage(rec)}` : missing,
+    );
     el.formAdd.classList.add('hidden');
     setKinPressed('');
     return;
@@ -1016,7 +1034,18 @@ function ensureRootForPerson(personId) {
   }
 }
 
-function buildRecoveryDraft({ target, kinKey, relation, anchor, parentRole, name, phase, message }) {
+function buildRecoveryDraft({
+  target,
+  kinKey,
+  relation,
+  anchor,
+  parentRole,
+  name,
+  phase,
+  message,
+  clientOpId,
+  allowCreate,
+}) {
   return {
     userId: state.userId,
     treeId: state.treeId || target?.tree_id || '',
@@ -1028,12 +1057,18 @@ function buildRecoveryDraft({ target, kinKey, relation, anchor, parentRole, name
     name: name || target?.name || '',
     phase,
     message,
+    clientOpId: clientOpId || state.recovery?.clientOpId || null,
+    allowCreate: Boolean(allowCreate),
   };
 }
 
+/**
+ * Display/bind may still be unfinished. Durable recovery must survive the await
+ * window (refresh/navigation bypass catch). Clear only after completion.
+ */
 async function finishAddSuccess(target) {
-  clearRecovery();
   await loadTree();
+  clearRecovery();
   openSheet(findPerson(target.id) || target);
 }
 
@@ -1108,11 +1143,15 @@ async function submitAdd(event) {
     if (relation === 'father') ensureParentSlot(anchor, 'father_id', null);
     if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', null);
 
-    const pendingId = state.addIntent.pendingPersonId || state.recovery?.pendingPersonId || null;
-    const phase = state.recovery?.phase || '';
+    let pendingId = state.addIntent.pendingPersonId || state.recovery?.pendingPersonId || null;
+    let phase = state.recovery?.phase || '';
+    const clientOpId = state.recovery?.clientOpId || newClientOpId();
 
     let target = null;
     if (pendingId) {
+      // Single GET-by-id failure does NOT clear recovery. Fall back to list;
+      // if loadPersons throws, error bubbles and durable recovery remains.
+      // Clear only when the list returns successfully and still lacks the id.
       try {
         target = await fetchPersonById(pendingId);
       } catch (_) {
@@ -1128,6 +1167,67 @@ async function submitAdd(event) {
         return;
       }
       state.addIntent.pendingPersonId = target.id;
+    } else if (isCreateUnresolvedPhase(phase) && !state.recovery?.allowCreate) {
+      // Lost/uncertain create response: never auto POST again until reconciled.
+      try {
+        await loadPersons();
+      } catch (_) { /* still block create */ }
+      const named = (state.recovery?.name || el.addName.value.trim() || '').trim();
+      const found = named ? state.persons.filter((p) => p.name === named) : [];
+      if (found.length === 1) {
+        // Safe adopt of the single same-name row in this scoped tree — not a new create.
+        target = found[0];
+        state.addIntent.pendingPersonId = target.id;
+        writeRecovery(buildRecoveryDraft({
+          target,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: named,
+          phase: 'created_unbound',
+          message: PARTIAL_SAVE_MSG,
+          clientOpId,
+        }));
+        phase = 'created_unbound';
+        pendingId = target.id;
+      } else if (found.length === 0) {
+        writeRecovery(buildRecoveryDraft({
+          target: null,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: named,
+          phase: 'create_uncertain',
+          message: `${CREATE_UNCERTAIN_MSG} 当前名单里还没有「${named || '这位'}」；若确认没有，请再点一次记下才会新建。`,
+          clientOpId,
+          allowCreate: true,
+        }));
+        showError(el.addError, state.recovery.message);
+        showError(el.sheetError, state.recovery.message);
+        state.mode = 'add';
+        el.formAdd.classList.remove('hidden');
+        return;
+      } else {
+        if (!isFirst && anchor) fillExistingSelect(anchor);
+        writeRecovery(buildRecoveryDraft({
+          target: null,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: named,
+          phase: 'create_uncertain',
+          message: `${CREATE_UNCERTAIN_MSG} 名单里有多位同名，请选择「已经在谱里」的那位。`,
+          clientOpId,
+        }));
+        showError(el.addError, state.recovery.message);
+        showError(el.sheetError, state.recovery.message);
+        state.mode = 'add';
+        el.formAdd.classList.remove('hidden');
+        return;
+      }
     } else {
       const payload = {
         name: el.addName.value.trim(),
@@ -1140,10 +1240,46 @@ async function submitAdd(event) {
         showError(el.addError, '请先写下这位亲人的名字。');
         return;
       }
-      target = await api('/persons', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
+      // Durable inflight marker before POST so refresh mid-create cannot orphan identity intent.
+      writeRecovery(buildRecoveryDraft({
+        target: null,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: payload.name,
+        phase: 'create_inflight',
+        message: CREATE_UNCERTAIN_MSG,
+        clientOpId,
+      }));
+      try {
+        target = await api('/persons', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      } catch (createErr) {
+        // Response may have been lost after commit — do not clear; block automatic re-POST.
+        writeRecovery(buildRecoveryDraft({
+          target: null,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: payload.name,
+          phase: 'create_uncertain',
+          message: CREATE_UNCERTAIN_MSG,
+          clientOpId,
+        }));
+        try {
+          await loadPersons();
+          if (!isFirst && anchor) fillExistingSelect(anchor);
+        } catch (_) { /* keep uncertain recovery */ }
+        state.mode = 'add';
+        el.formAdd.classList.remove('hidden');
+        showError(el.addError, CREATE_UNCERTAIN_MSG);
+        showError(el.sheetError, CREATE_UNCERTAIN_MSG);
+        return;
+      }
       state.addIntent.pendingPersonId = target.id;
       writeRecovery(buildRecoveryDraft({
         target,
@@ -1154,7 +1290,10 @@ async function submitAdd(event) {
         name: payload.name,
         phase: 'created_unbound',
         message: PARTIAL_SAVE_MSG,
+        clientOpId,
       }));
+      phase = 'created_unbound';
+      pendingId = target.id;
       try {
         await loadPersons();
       } catch (_) {
@@ -1162,8 +1301,8 @@ async function submitAdd(event) {
       }
     }
 
-    // Saved person exists; display-load-only recovery skips bind.
-    if (phase === 'display_load_failed') {
+    // Saved person exists; display-load-only recovery skips bind (pending or failed).
+    if (phase === 'display_load_failed' || phase === 'display_load_pending') {
       if (isFirst) {
         state.rootId = String(target.id);
         localStorage.setItem(ROOT_KEY, state.rootId);

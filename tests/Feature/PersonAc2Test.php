@@ -312,4 +312,88 @@ class PersonAc2Test extends TestCase
         ])->assertOk()
             ->assertJsonPath('father_id', $father->id);
     }
+
+    public function test_same_mother_id_patch_is_idempotent(): void
+    {
+        $user = User::factory()->create();
+        Sanctum::actingAs($user);
+        $tree = Tree::query()->create([
+            'owner_user_id' => $user->id,
+            'title' => '我的家族',
+        ]);
+        $mother = Person::query()->create([
+            'tree_id' => $tree->id,
+            'name' => '母',
+            'gender' => 'female',
+            'generation' => 1,
+        ]);
+        $child = Person::query()->create([
+            'tree_id' => $tree->id,
+            'name' => '子',
+            'gender' => 'unknown',
+            'generation' => 2,
+            'mother_id' => $mother->id,
+        ]);
+
+        $this->patchJson('/api/v1/persons/'.$child->id, [
+            'mother_id' => $mother->id,
+        ])->assertOk()
+            ->assertJsonPath('mother_id', $mother->id);
+
+        $this->assertDatabaseHas('persons', [
+            'id' => $child->id,
+            'mother_id' => $mother->id,
+        ]);
+    }
+
+    public function test_existing_person_cannot_replace_occupied_father_slot(): void
+    {
+        $user = User::factory()->create();
+        Sanctum::actingAs($user);
+        $tree = Tree::query()->create([
+            'owner_user_id' => $user->id,
+            'title' => '我的家族',
+        ]);
+        $fatherA = Person::query()->create([
+            'tree_id' => $tree->id,
+            'name' => '父甲',
+            'gender' => 'male',
+            'generation' => 1,
+        ]);
+        $fatherB = Person::query()->create([
+            'tree_id' => $tree->id,
+            'name' => '父乙',
+            'gender' => 'male',
+            'generation' => 1,
+        ]);
+        $child = Person::query()->create([
+            'tree_id' => $tree->id,
+            'name' => '子',
+            'gender' => 'unknown',
+            'generation' => 2,
+            'father_id' => $fatherA->id,
+        ]);
+
+        $this->patchJson('/api/v1/persons/'.$child->id, [
+            'father_id' => $fatherB->id,
+        ])->assertStatus(422)
+            ->assertJsonValidationErrors(['father_id']);
+
+        $this->assertDatabaseHas('persons', [
+            'id' => $child->id,
+            'father_id' => $fatherA->id,
+        ]);
+        $this->assertDatabaseHas('persons', ['id' => $fatherA->id]);
+        $this->assertDatabaseHas('persons', ['id' => $fatherB->id]);
+
+        $treeJson = $this->getJson('/api/v1/persons/'.$child->id.'/tree')->assertOk()->json();
+        $parentEdges = collect($treeJson['edges'] ?? [])
+            ->where('type', 'parent')
+            ->map(fn ($e) => $e['from'].'->'.$e['to'])
+            ->values()
+            ->all();
+        $this->assertContains($fatherA->id.'->'.$child->id, $parentEdges);
+        $this->assertNotContains($fatherB->id.'->'.$child->id, $parentEdges);
+        $this->assertCount(3, $treeJson['nodes'] ?? []);
+    }
 }
