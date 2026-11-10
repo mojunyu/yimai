@@ -27,7 +27,7 @@ const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR
   : path.resolve(APP_ROOT, 'artifacts');
 
 /** Must match results logged by the ordered suite. Aborting early fails. */
-const EXPECTED_TEST_COUNT = 31;
+const EXPECTED_TEST_COUNT = 34;
 
 let browser;
 let page;
@@ -240,6 +240,9 @@ async function installFetchHooks() {
     window.__yimaiTreeDelayArmed = false;
     window.__yimaiTreeDelayActive = false;
     window.__yimaiLoseNextPersonPostResponse = false;
+    window.__yimaiFailPersonPostBeforeCommit = false;
+    window.__yimaiNextPersonPost422 = false;
+    window.__yimaiNextPersonPost422Msg = '';
     window.__yimaiFailNextPersonGetId = null;
     window.__yimaiPostPersonCount = 0;
     window.fetch = async (input, init = {}) => {
@@ -247,6 +250,18 @@ async function installFetchHooks() {
       const method = (init.method || 'GET').toUpperCase();
       if (method === 'POST' && /\/api\/v1\/persons\/?$/.test(url.replace(/\?.*$/, ''))) {
         window.__yimaiPostPersonCount += 1;
+        if (window.__yimaiFailPersonPostBeforeCommit) {
+          window.__yimaiFailPersonPostBeforeCommit = false;
+          throw new TypeError('Failed to fetch (simulated network fail before commit)');
+        }
+        if (window.__yimaiNextPersonPost422) {
+          window.__yimaiNextPersonPost422 = false;
+          const msg = window.__yimaiNextPersonPost422Msg || 'forced create validation failure';
+          return new Response(JSON.stringify({ message: msg }), {
+            status: 422,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
         if (window.__yimaiLoseNextPersonPostResponse) {
           window.__yimaiLoseNextPersonPostResponse = false;
           // Backend commits; client never receives the body (unknown outcome).
@@ -329,8 +344,39 @@ async function armLoseNextPersonPostResponse() {
   await page.evaluate(() => { window.__yimaiLoseNextPersonPostResponse = true; });
 }
 
+async function armFailPersonPostBeforeCommit() {
+  await page.evaluate(() => { window.__yimaiFailPersonPostBeforeCommit = true; });
+}
+
+async function armPersonPost422(message = 'forced create validation failure') {
+  await page.evaluate((msg) => {
+    window.__yimaiNextPersonPost422 = true;
+    window.__yimaiNextPersonPost422Msg = msg;
+  }, message);
+}
+
 async function armPersonGetFail(id) {
   await page.evaluate((pid) => { window.__yimaiFailNextPersonGetId = String(pid); }, id);
+}
+
+async function selectExistingByPersonId(personId) {
+  await page.evaluate((id) => {
+    const sel = document.getElementById('add-existing');
+    if (!sel) throw new Error('add-existing missing');
+    sel.value = String(id);
+    if (sel.value !== String(id)) throw new Error(`cannot select id ${id}`);
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }, personId);
+}
+
+async function selectConfirmNew() {
+  await page.evaluate(() => {
+    const sel = document.getElementById('add-existing');
+    if (!sel) throw new Error('add-existing missing');
+    sel.value = '__confirm_new__';
+    if (sel.value !== '__confirm_new__') throw new Error('confirm-new option missing');
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
 }
 
 async function readRecovery() {
@@ -1175,25 +1221,228 @@ async function testLostCreateResponseNoSecondPost() {
   const recovery1 = await readRecovery();
   const posts1 = await page.evaluate(() => window.__yimaiPostPersonCount);
   const created = (await personsViaApi()).filter((p) => p.name === '丢包女儿');
-  // Retry: must reconcile without second POST; adopt committed id and finish bind.
+  // Blind retry must NOT auto-adopt/bind by name.
+  await submitAddForm();
+  await sleep(800);
+  const postsBlind = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const mid = await personByNameViaApi('丢包女儿');
+  const stillUnbound = mid && (mid.father_id == null || mid.father_id === '');
+  // Explicit ID selection of the committed person — not name heuristic.
+  await selectExistingByPersonId(created[0].id);
   await submitAddForm();
   await sleep(1200);
   const posts2 = await page.evaluate(() => window.__yimaiPostPersonCount);
   const after = (await personsViaApi()).filter((p) => p.name === '丢包女儿');
+  const snap = await treeSnapshot();
+  const edgeOk = snap.parentEdges.includes(`${auth.personId}->${created[0].id}`);
   const ok = err1.includes('不确定')
-    && recovery1
-    && (recovery1.phase === 'create_uncertain' || recovery1.phase === 'created_unbound' || recovery1.phase === 'display_load_pending' || recovery1.phase === 'display_load_failed' || !recovery1)
+    && err1.includes('同名不会自动合并')
+    && recovery1?.phase === 'create_uncertain'
+    && !recovery1.pendingPersonId
     && posts1 === 1
-    && posts2 === 1 // still one total — second submit must not POST again
+    && postsBlind === 1
+    && stillUnbound
+    && posts2 === 1
     && created.length === 1
     && after.length === 1
     && String(after[0].id) === String(created[0].id)
-    && Number(after[0].father_id) === Number(auth.personId);
+    && Number(after[0].father_id) === Number(auth.personId)
+    && edgeOk;
   await screenshot('recovery-lost-create-response.png');
   log(
-    'Lost create response keeps count stable without second POST',
+    'Lost create response requires explicit ID; no name auto-adopt',
     ok,
-    `posts ${posts1}->${posts2}, ids=${after.map((p) => p.id).join(',')}, phase=${recovery1?.phase}, err=${err1.slice(0, 40)}`,
+    `posts ${posts1}/${postsBlind}/${posts2}, id=${after[0]?.id}, father=${after[0]?.father_id}, edgeOk=${edgeOk}`,
+  );
+}
+
+async function testSameName422NoAdoptThenValidCreate() {
+  // Preexisting 李四; attempted POST 422 (no commit) must not bind old 李四.
+  const auth = phpCreateUser({ withPerson: true, personName: '校验锚点', gender: 'male' });
+  const old = await page.evaluate(async (a) => {
+    const headers = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${a.token}`,
+    };
+    return fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: '李四', gender: 'female', generation: 2 }),
+    }).then((r) => r.json());
+  }, auth);
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('校验锚点');
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  await page.click('button[data-kin="daughter"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '李四');
+  await armPersonPost422('forced create validation failure');
+  await submitAddForm();
+  await sleep(900);
+  const err = await page.$eval('#add-error', (el) => el.textContent);
+  const recovery = await readRecovery();
+  const posts1 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const oldAfter = await page.evaluate(async (id) => {
+    const token = localStorage.getItem('yimai_token');
+    const res = await fetch(`${location.origin}/api/v1/persons/${id}`, {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+    });
+    return res.json();
+  }, old.id);
+  const count1 = await personCountViaApi();
+  // Corrected valid resubmit creates a distinct person.
+  await page.$eval('#add-name', (el) => { el.value = ''; });
+  await page.type('#add-name', '李四乙');
+  await submitAddForm();
+  await sleep(1200);
+  const posts2 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const list = await personsViaApi();
+  const created = list.filter((p) => p.name === '李四乙');
+  const stillOld = list.find((p) => Number(p.id) === Number(old.id));
+  const snap = await treeSnapshot();
+  const ok = err.includes('forced create validation failure')
+    && !err.includes('不确定')
+    && recovery == null
+    && posts1 === 1
+    && oldAfter.father_id == null
+    && count1 === 2 // anchor + old 李四 only
+    && posts2 === 2
+    && created.length === 1
+    && Number(created[0].id) !== Number(old.id)
+    && Number(created[0].father_id) === Number(auth.personId)
+    && stillOld
+    && stillOld.father_id == null
+    && snap.parentEdges.includes(`${auth.personId}->${created[0].id}`)
+    && !snap.parentEdges.includes(`${auth.personId}->${old.id}`);
+  log(
+    'Definite 422 create rejection: no same-name adopt; corrected create distinct',
+    ok,
+    `posts ${posts1}->${posts2}, old=${old.id}/${stillOld?.father_id}, new=${created[0]?.id}/${created[0]?.father_id}`,
+  );
+}
+
+async function testSameNameNetworkFailRequiresExplicitChoice() {
+  // Old 李四 exists; network fail before commit; retry must not auto-bind old 李四.
+  const auth = phpCreateUser({ withPerson: true, personName: '网断锚点', gender: 'male' });
+  const old = await page.evaluate(async (a) => {
+    const headers = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${a.token}`,
+    };
+    return fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: '李四', gender: 'male', generation: 2 }),
+    }).then((r) => r.json());
+  }, auth);
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('网断锚点');
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  await page.click('button[data-kin="son"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '李四');
+  await armFailPersonPostBeforeCommit();
+  await submitAddForm();
+  await sleep(900);
+  const err1 = await page.$eval('#add-error', (el) => el.textContent);
+  const posts1 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  // Blind retry: still no bind of old 李四, no second create until explicit choice.
+  await submitAddForm();
+  await sleep(700);
+  const posts2 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const oldMid = await page.evaluate(async (id) => {
+    const token = localStorage.getItem('yimai_token');
+    return fetch(`${location.origin}/api/v1/persons/${id}`, {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+    }).then((r) => r.json());
+  }, old.id);
+  // Explicit confirm-new then successful create of a distinct 李四.
+  await selectConfirmNew();
+  await submitAddForm();
+  await sleep(1200);
+  const posts3 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const named = (await personsViaApi()).filter((p) => p.name === '李四');
+  const snap = await treeSnapshot();
+  const newOne = named.find((p) => Number(p.id) !== Number(old.id));
+  const ok = err1.includes('不确定')
+    && posts1 === 1
+    && posts2 === 1
+    && oldMid.father_id == null
+    && posts3 === 2
+    && named.length === 2
+    && newOne
+    && Number(newOne.father_id) === Number(auth.personId)
+    && snap.parentEdges.includes(`${auth.personId}->${newOne.id}`)
+    && !snap.parentEdges.includes(`${auth.personId}->${old.id}`);
+  log(
+    'Network fail before commit with same-name: explicit choice, no auto-bind',
+    ok,
+    `posts ${posts1}/${posts2}/${posts3}, oldF=${oldMid.father_id}, new=${newOne?.id}, names=${named.length}`,
+  );
+}
+
+async function testLostResponseSameNameNoAutoSelect() {
+  // Lost response AFTER commit while another same-name already exists — must not auto-select either.
+  const auth = phpCreateUser({ withPerson: true, personName: '丢包同名锚', gender: 'male' });
+  const old = await page.evaluate(async (a) => {
+    const headers = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${a.token}`,
+    };
+    return fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: '李四', gender: 'female', generation: 2 }),
+    }).then((r) => r.json());
+  }, auth);
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('丢包同名锚');
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  await page.click('button[data-kin="daughter"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '李四');
+  await armLoseNextPersonPostResponse();
+  await submitAddForm();
+  await sleep(1200);
+  const posts1 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const named = (await personsViaApi()).filter((p) => p.name === '李四');
+  const committed = named.find((p) => Number(p.id) !== Number(old.id));
+  await submitAddForm(); // blind — no auto select
+  await sleep(700);
+  const posts2 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const afterBlind = await personsViaApi();
+  const oldBlind = afterBlind.find((p) => Number(p.id) === Number(old.id));
+  const newBlind = afterBlind.find((p) => Number(p.id) === Number(committed?.id));
+  // Explicitly select the newly committed id (not the old same-name).
+  await selectExistingByPersonId(committed.id);
+  await submitAddForm();
+  await sleep(1200);
+  const posts3 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const final = await personsViaApi();
+  const oldFinal = final.find((p) => Number(p.id) === Number(old.id));
+  const newFinal = final.find((p) => Number(p.id) === Number(committed.id));
+  const snap = await treeSnapshot();
+  const ok = posts1 === 1
+    && named.length === 2
+    && committed
+    && posts2 === 1
+    && oldBlind.father_id == null
+    && (newBlind.father_id == null || newBlind.father_id === '')
+    && posts3 === 1
+    && oldFinal.father_id == null
+    && Number(newFinal.father_id) === Number(auth.personId)
+    && snap.parentEdges.includes(`${auth.personId}->${committed.id}`)
+    && !snap.parentEdges.includes(`${auth.personId}->${old.id}`);
+  log(
+    'Lost response with preexisting same-name: no auto-select; explicit ID binds',
+    ok,
+    `posts ${posts1}/${posts2}/${posts3}, old=${old.id}/${oldFinal?.father_id}, new=${committed?.id}/${newFinal?.father_id}`,
   );
 }
 
@@ -1414,6 +1663,9 @@ async function runAllTests() {
     testRefreshDuringDisplayLoadKeepsIdentity,
     testSiblingMissingParentKeepsRecoveryNotice,
     testLostCreateResponseNoSecondPost,
+    testSameName422NoAdoptThenValidCreate,
+    testSameNameNetworkFailRequiresExplicitChoice,
+    testLostResponseSameNameNoAutoSelect,
     testPendingGetFailFallsBackToListWithoutClear,
     testDoubleSubmitDoesNotDuplicate,
     testParentOverwriteBlockedFatherAndMother,

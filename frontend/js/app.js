@@ -39,7 +39,8 @@ const state = {
 
 const PARTIAL_SAVE_MSG = '人已记下，关系未保存';
 const DISPLAY_LOAD_FAIL_MSG = '人已记下且关系已保存，但画面没有刷新成功。请再点记下或重新载入，不会重复添加。';
-const CREATE_UNCERTAIN_MSG = '刚才的记下结果还不确定（可能已保存但回信丢失）。请先重新载入名单；若已出现请选择「已经在谱里」的那位再继续。确认之前不会再次新建。';
+const CREATE_UNCERTAIN_MSG = '刚才的记下结果还不确定（可能已保存但回信丢失）。同名不会自动合并。请在下拉框明确选择一位已有亲人，或选「确认新建」；确认之前不会自动绑关系或再次新建。';
+const CONFIRM_NEW_VALUE = '__confirm_new__';
 
 const KIN = {
   father: { relation: 'father', gender: 'male', word: '父亲' },
@@ -122,21 +123,55 @@ function showError(node, message) {
   node.classList.remove('hidden');
 }
 
+function makeApiError(message, { status = 0, body = null, uncertain = false } = {}) {
+  const err = new Error(message);
+  err.name = 'ApiError';
+  err.status = status;
+  err.body = body;
+  err.uncertain = Boolean(uncertain);
+  return err;
+}
+
+function isDefiniteClientRejection(err) {
+  const status = Number(err?.status || 0);
+  return status === 422 || status === 401 || status === 403 || status === 404 || status === 409;
+}
+
 async function api(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: { ...authHeaders(), ...(options.headers || {}) },
-  });
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: { ...authHeaders(), ...(options.headers || {}) },
+    });
+  } catch (networkErr) {
+    throw makeApiError(networkErr?.message || '网络异常，结果不确定。', {
+      status: 0,
+      uncertain: true,
+    });
+  }
   if (!res.ok) {
     let detail = '没有保存成功，请再试一次。';
+    let body = null;
     try {
-      const body = await res.json();
+      body = await res.json();
       detail = formatApiError(body, detail);
-    } catch (_) { /* ignore */ }
-    throw new Error(detail);
+    } catch (_) { /* keep fallback detail */ }
+    throw makeApiError(detail, {
+      status: res.status,
+      body,
+      uncertain: false,
+    });
   }
   if (res.status === 204) return null;
-  return res.json();
+  try {
+    return await res.json();
+  } catch (_) {
+    throw makeApiError('服务器回信无法解析，结果不确定。', {
+      status: res.status,
+      uncertain: true,
+    });
+  }
 }
 
 function countEdges(tree) {
@@ -261,9 +296,10 @@ function readRecoveryRaw() {
 }
 
 function recoveryScopedOk(rec) {
-  if (!rec || !state.userId) return false;
-  if (!sameId(rec.userId, state.userId)) return false;
-  if (rec.treeId && state.treeId && !sameId(rec.treeId, state.treeId)) return false;
+  if (!rec || !state.userId || !state.treeId) return false;
+  if (!rec.userId || !sameId(rec.userId, state.userId)) return false;
+  // Missing tree id must not authorize applying recovery across trees.
+  if (!rec.treeId || !sameId(rec.treeId, state.treeId)) return false;
   return true;
 }
 
@@ -548,6 +584,27 @@ function fillExistingSelect(anchor) {
     emptyLabel: '不是，这是一位新记下的亲人',
     selectedId: '',
   });
+}
+
+/**
+ * Uncertain-create exit: explicit ID selection or explicit confirm-new only.
+ * Never preselect / auto-adopt by name. Options are current account/tree persons only.
+ */
+function prepareUncertainPersonSelect(anchor) {
+  if (!el.addExistingWrap || !el.addExisting) return;
+  const options = [
+    `<option value="">请明确选择（同名不会自动合并）</option>`,
+    `<option value="${CONFIRM_NEW_VALUE}">确认新建：名单里没有我要的那位</option>`,
+  ];
+  for (const person of state.persons) {
+    if (anchor && sameId(person.id, anchor.id)) continue;
+    const gender = genderWord(person.gender);
+    const label = gender ? `${person.name}（${gender}）#${person.id}` : `${person.name}#${person.id}`;
+    options.push(`<option value="${person.id}">${escapeHtml(label)}</option>`);
+  }
+  el.addExistingWrap.classList.remove('hidden');
+  el.addExisting.innerHTML = options.join('');
+  el.addExisting.value = '';
 }
 
 function showAddFormForKin(kinKey, anchor, { resume = false } = {}) {
@@ -1103,9 +1160,11 @@ async function submitAdd(event) {
       state.addIntent.parentRole = parentRole;
     }
 
-    const existingId = el.addExisting && !el.addExistingWrap.classList.contains('hidden')
+    const selectRaw = el.addExisting && !el.addExistingWrap.classList.contains('hidden')
       ? el.addExisting.value
       : '';
+    const confirmNew = selectRaw === CONFIRM_NEW_VALUE;
+    const existingId = confirmNew ? '' : selectRaw;
 
     if (existingId) {
       let existing = findPerson(existingId);
@@ -1114,6 +1173,7 @@ async function submitAdd(event) {
         showError(el.addError, '请重新选择已经在谱里的那位亲人。');
         return;
       }
+      // Explicit ID choice only — never inferred from name.
       if (relation === 'father') ensureParentSlot(anchor, 'father_id', existing.id);
       if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', existing.id);
       await bindPerson(existing, relation, anchor);
@@ -1167,67 +1227,29 @@ async function submitAdd(event) {
         return;
       }
       state.addIntent.pendingPersonId = target.id;
-    } else if (isCreateUnresolvedPhase(phase) && !state.recovery?.allowCreate) {
-      // Lost/uncertain create response: never auto POST again until reconciled.
+    } else if (isCreateUnresolvedPhase(phase) && !confirmNew) {
+      // NO name-based adopt/merge. Require explicit existing ID or confirm-new.
       try {
         await loadPersons();
-      } catch (_) { /* still block create */ }
+      } catch (_) { /* still require explicit choice */ }
+      prepareUncertainPersonSelect(anchor);
       const named = (state.recovery?.name || el.addName.value.trim() || '').trim();
-      const found = named ? state.persons.filter((p) => p.name === named) : [];
-      if (found.length === 1) {
-        // Safe adopt of the single same-name row in this scoped tree — not a new create.
-        target = found[0];
-        state.addIntent.pendingPersonId = target.id;
-        writeRecovery(buildRecoveryDraft({
-          target,
-          kinKey,
-          relation,
-          anchor,
-          parentRole,
-          name: named,
-          phase: 'created_unbound',
-          message: PARTIAL_SAVE_MSG,
-          clientOpId,
-        }));
-        phase = 'created_unbound';
-        pendingId = target.id;
-      } else if (found.length === 0) {
-        writeRecovery(buildRecoveryDraft({
-          target: null,
-          kinKey,
-          relation,
-          anchor,
-          parentRole,
-          name: named,
-          phase: 'create_uncertain',
-          message: `${CREATE_UNCERTAIN_MSG} 当前名单里还没有「${named || '这位'}」；若确认没有，请再点一次记下才会新建。`,
-          clientOpId,
-          allowCreate: true,
-        }));
-        showError(el.addError, state.recovery.message);
-        showError(el.sheetError, state.recovery.message);
-        state.mode = 'add';
-        el.formAdd.classList.remove('hidden');
-        return;
-      } else {
-        if (!isFirst && anchor) fillExistingSelect(anchor);
-        writeRecovery(buildRecoveryDraft({
-          target: null,
-          kinKey,
-          relation,
-          anchor,
-          parentRole,
-          name: named,
-          phase: 'create_uncertain',
-          message: `${CREATE_UNCERTAIN_MSG} 名单里有多位同名，请选择「已经在谱里」的那位。`,
-          clientOpId,
-        }));
-        showError(el.addError, state.recovery.message);
-        showError(el.sheetError, state.recovery.message);
-        state.mode = 'add';
-        el.formAdd.classList.remove('hidden');
-        return;
-      }
+      writeRecovery(buildRecoveryDraft({
+        target: null,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: named,
+        phase: 'create_uncertain',
+        message: CREATE_UNCERTAIN_MSG,
+        clientOpId,
+      }));
+      state.mode = 'add';
+      el.formAdd.classList.remove('hidden');
+      showError(el.addError, CREATE_UNCERTAIN_MSG);
+      showError(el.sheetError, CREATE_UNCERTAIN_MSG);
+      return;
     } else {
       const payload = {
         name: el.addName.value.trim(),
@@ -1258,7 +1280,17 @@ async function submitAdd(event) {
           body: JSON.stringify(payload),
         });
       } catch (createErr) {
-        // Response may have been lost after commit — do not clear; block automatic re-POST.
+        if (isDefiniteClientRejection(createErr)) {
+          // Definite validation/auth rejection: not "maybe saved". Allow corrected resubmit.
+          clearRecovery();
+          state.addIntent.pendingPersonId = null;
+          state.mode = 'add';
+          el.formAdd.classList.remove('hidden');
+          showError(el.addError, createErr.message || '没有保存成功，请改一改再试。');
+          showError(el.sheetError, '');
+          return;
+        }
+        // Network / parse / unknown outcome — do not clear; no auto POST; no name adopt.
         writeRecovery(buildRecoveryDraft({
           target: null,
           kinKey,
@@ -1272,7 +1304,7 @@ async function submitAdd(event) {
         }));
         try {
           await loadPersons();
-          if (!isFirst && anchor) fillExistingSelect(anchor);
+          prepareUncertainPersonSelect(anchor);
         } catch (_) { /* keep uncertain recovery */ }
         state.mode = 'add';
         el.formAdd.classList.remove('hidden');
@@ -1421,9 +1453,13 @@ el.kinGrid.addEventListener('click', (event) => {
   startAddForKin(button.dataset.kin);
 });
 el.addExisting?.addEventListener('change', () => {
-  const usingExisting = Boolean(el.addExisting.value);
+  const val = el.addExisting.value;
+  const usingExisting = Boolean(val) && val !== CONFIRM_NEW_VALUE;
   el.addName.required = !usingExisting;
-  if (usingExisting) el.addName.value = el.addExisting.selectedOptions[0]?.textContent.split('（')[0] || el.addName.value;
+  if (usingExisting) {
+    const label = el.addExisting.selectedOptions[0]?.textContent || '';
+    el.addName.value = label.split('（')[0].split('#')[0] || el.addName.value;
+  }
 });
 el.addParentRole?.addEventListener('change', () => {
   state.addIntent.parentRole = el.addParentRole.value || '';
