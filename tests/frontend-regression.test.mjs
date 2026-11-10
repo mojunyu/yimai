@@ -27,7 +27,7 @@ const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR
   : path.resolve(APP_ROOT, 'artifacts');
 
 /** Must match results logged by the ordered suite. Aborting early fails. */
-const EXPECTED_TEST_COUNT = 34;
+const EXPECTED_TEST_COUNT = 35;
 
 let browser;
 let page;
@@ -1385,6 +1385,119 @@ async function testSameNameNetworkFailRequiresExplicitChoice() {
   );
 }
 
+function phpCreateEmptyUserNoTree() {
+  const email = `emptyui${Date.now()}${Math.floor(Math.random() * 1000)}@test.test`;
+  const script = `<?php
+require '${APP_ROOT}/vendor/autoload.php';
+$app = require '${APP_ROOT}/bootstrap/app.php';
+$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();
+$u = App\\Models\\User::create(['name'=>'EmptyUI','email'=>'${email}','password'=>bcrypt('password')]);
+// No Tree row — login must acquire scope via trees/current.
+echo json_encode(['userId'=>$u->id,'email'=>'${email}'], JSON_UNESCAPED_UNICODE);
+`;
+  const tmp = path.join(ARTIFACTS_DIR, `_tmp_empty_${Date.now()}.php`);
+  fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
+  fs.writeFileSync(tmp, script);
+  const result = spawnSync('php', [tmp], { cwd: APP_ROOT, encoding: 'utf8' });
+  fs.unlinkSync(tmp);
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+  const parsed = JSON.parse((result.stdout || '').trim().split('\n').filter(Boolean).pop());
+  return { email: parsed.email, userId: String(parsed.userId), password: 'password' };
+}
+
+async function loginViaUi(email, password) {
+  // Clear before scripts boot to avoid prior-test token/treeId races.
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.evaluate((auth) => {
+    document.getElementById('email').value = auth.email;
+    document.getElementById('password').value = auth.password;
+    document.getElementById('btn-login').click();
+  }, { email, password });
+  await page.waitForFunction(() => {
+    const stats = document.getElementById('stats')?.textContent || '';
+    const treeId = localStorage.getItem('yimai_tree_id');
+    return (stats.includes('没有记下') || stats.includes('位亲人')) && Boolean(treeId);
+  }, { timeout: 20000 });
+  await sleep(300);
+}
+
+async function testEmptyAccountRealLoginTreeScopeAndLostCreate() {
+  // Hidden by injectAuth fixtures: fresh empty account has no treeId until trees/current.
+  const user = phpCreateEmptyUserNoTree();
+  await loginViaUi(user.email, user.password);
+  const afterLogin = await page.evaluate(() => ({
+    treeId: localStorage.getItem('yimai_tree_id'),
+    userId: localStorage.getItem('yimai_user_id'),
+  }));
+  await installFetchHooks();
+  await page.evaluate(() => {
+    window.__yimaiPostPersonCount = 0;
+    window.__yimaiLoseNextPersonPostResponse = true;
+  });
+  await page.evaluate(() => document.getElementById('btn-add').click());
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 10000 });
+  await page.$eval('#add-name', (el) => { el.value = '实登录第一人'; });
+  await submitAddForm();
+  await sleep(1200);
+  const afterLost = await readRecovery();
+  const posts1 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => Boolean(localStorage.getItem('yimai_token')), { timeout: 20000 });
+  await sleep(900);
+  const afterRefresh = await readRecovery();
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  // Blind retry must not POST again while uncertain recovery is scoped.
+  const formOpen = await page.$eval('#form-add', (el) => !el.classList.contains('hidden')).catch(() => false);
+  if (!formOpen) {
+    await page.evaluate(() => document.getElementById('btn-add').click());
+    await page.waitForSelector('#form-add:not(.hidden)', { timeout: 8000 }).catch(() => null);
+  }
+  await page.$eval('#add-name', (el) => { el.value = '实登录第一人'; }).catch(() => null);
+  await submitAddForm().catch(() => null);
+  await sleep(900);
+  const postsBlind = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const named = (await personsViaApi()).filter((p) => p.name === '实登录第一人');
+  // Explicit ID selection completes without a second create.
+  if (named[0] && afterRefresh) {
+    await selectExistingByPersonId(named[0].id);
+    await submitAddForm();
+    await sleep(1200);
+  }
+  const postsFinal = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const finalNamed = (await personsViaApi()).filter((p) => p.name === '实登录第一人');
+  const ok = Boolean(afterLogin.treeId)
+    && String(afterLogin.userId) === String(user.userId)
+    && afterLost
+    && Boolean(afterLost.treeId)
+    && String(afterLost.treeId) === String(afterLogin.treeId)
+    && afterLost.phase === 'create_uncertain'
+    && afterRefresh
+    && String(afterRefresh.treeId) === String(afterLost.treeId)
+    && String(afterRefresh.userId || afterLogin.userId) === String(user.userId)
+    && posts1 === 1
+    && postsBlind === 0
+    && finalNamed.length === 1
+    && Number(finalNamed[0].tree_id) === Number(afterLogin.treeId)
+    && postsFinal === 0;
+  await screenshot('empty-account-real-login-lost-create.png');
+  log(
+    'Empty-account real login acquires treeId; lost create+F5 keeps scoped recovery (no duplicate)',
+    ok,
+    `loginTree=${afterLogin.treeId}, lostTree=${afterLost?.treeId}, refreshTree=${afterRefresh?.treeId}, posts ${posts1}/${postsBlind}/${postsFinal}, ids=${finalNamed.map((p) => p.id).join(',')}`,
+  );
+}
+
 async function testLostResponseSameNameNoAutoSelect() {
   // Lost response AFTER commit while another same-name already exists — must not auto-select either.
   const auth = phpCreateUser({ withPerson: true, personName: '丢包同名锚', gender: 'male' });
@@ -1663,6 +1776,7 @@ async function runAllTests() {
     testRefreshDuringDisplayLoadKeepsIdentity,
     testSiblingMissingParentKeepsRecoveryNotice,
     testLostCreateResponseNoSecondPost,
+    testEmptyAccountRealLoginTreeScopeAndLostCreate,
     testSameName422NoAdoptThenValidCreate,
     testSameNameNetworkFailRequiresExplicitChoice,
     testLostResponseSameNameNoAutoSelect,

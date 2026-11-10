@@ -303,6 +303,22 @@ function recoveryScopedOk(rec) {
   return true;
 }
 
+/**
+ * MVP: one tree per user. Empty accounts never learn treeId from an empty
+ * person list — fetch /trees/current so recovery/create always own a scope.
+ * force=true on login so a prior session's treeId cannot stick to a new account.
+ */
+async function ensureCurrentTreeId({ force = false } = {}) {
+  if (!state.token) return '';
+  if (state.treeId && !force) return state.treeId;
+  const tree = await api('/trees/current');
+  if (tree?.id != null) {
+    state.treeId = String(tree.id);
+    localStorage.setItem(TREE_KEY, state.treeId);
+  }
+  return state.treeId;
+}
+
 function writeRecovery(rec) {
   if (!rec) {
     localStorage.removeItem(RECOVERY_KEY);
@@ -385,22 +401,41 @@ function syncRootWithPersons() {
   }
 }
 
-function loadScopedRecovery() {
-  const rec = readRecoveryRaw();
-  if (rec && recoveryScopedOk(rec)) {
+async function loadScopedRecovery() {
+  let rec = readRecoveryRaw();
+  if (!rec) {
+    state.recovery = null;
+    return null;
+  }
+  // Cross-account: drop immediately. Never adopt foreign recovery.
+  if (!state.userId || !rec.userId || !sameId(rec.userId, state.userId)) {
+    localStorage.removeItem(RECOVERY_KEY);
+    state.recovery = null;
+    return null;
+  }
+  // Same account but empty treeId (empty-list login gap): stamp current tree
+  // after ensureCurrentTreeId. MVP is one tree per user — does not weaken
+  // cross-account isolation or allow cross-tree when rec.treeId is set.
+  if (!rec.treeId) {
+    try {
+      await ensureCurrentTreeId();
+    } catch (_) { /* keep trying scope check below */ }
+    if (state.treeId) {
+      rec = { ...rec, treeId: String(state.treeId) };
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify(rec));
+    }
+  }
+  if (recoveryScopedOk(rec)) {
     state.recovery = rec;
     return rec;
   }
-  // Drop cross-account leakage.
-  if (rec && !recoveryScopedOk(rec)) {
-    localStorage.removeItem(RECOVERY_KEY);
-  }
+  localStorage.removeItem(RECOVERY_KEY);
   state.recovery = null;
   return null;
 }
 
 async function resumeRecoveryUi() {
-  const rec = loadScopedRecovery();
+  const rec = await loadScopedRecovery();
   if (!rec) return;
   showRecoveryGuidance();
   if (rec.kin === 'first') {
@@ -408,6 +443,8 @@ async function resumeRecoveryUi() {
     if (pending) {
       // First person already exists — guide reload rather than create again.
       showError(el.sheetError, recoveryMessage(rec));
+    } else if (isCreateUnresolvedPhase(rec.phase)) {
+      showFirstPersonForm();
     }
     return;
   }
@@ -437,6 +474,9 @@ async function login() {
   if (state.userId) localStorage.setItem(USER_KEY, state.userId);
   setAuthed(true);
 
+  // Acquire tree scope before any create/recovery — empty person list cannot supply it.
+  // Force refresh so a previous account's treeId cannot remain on this session.
+  await ensureCurrentTreeId({ force: true });
   await loadPersons();
   syncRootWithPersons();
   await loadTree();
@@ -445,6 +485,9 @@ async function login() {
 
 async function loadTree() {
   if (!state.token) return;
+  try {
+    await ensureCurrentTreeId();
+  } catch (_) { /* persons path may still sync later */ }
   await loadPersons();
   syncRootWithPersons();
   if (!state.rootId) {
@@ -663,6 +706,7 @@ function showAddFormForKin(kinKey, anchor, { resume = false } = {}) {
 function showFirstPersonForm() {
   const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
   const canResume = Boolean(rec && rec.kin === 'first' && rec.pendingPersonId);
+  const uncertainFirst = Boolean(rec && rec.kin === 'first' && isCreateUnresolvedPhase(rec.phase) && !rec.pendingPersonId);
   state.mode = 'add';
   state.selectedId = null;
   state.addIntent = emptyIntent({
@@ -683,9 +727,15 @@ function showFirstPersonForm() {
   if (canResume) {
     state.addIntent.pendingPersonId = rec.pendingPersonId;
     el.addName.value = rec.name || '';
+    el.addExistingWrap.classList.add('hidden');
     showError(el.addError, recoveryMessage(rec));
+  } else if (uncertainFirst) {
+    el.addName.value = rec.name || '';
+    prepareUncertainPersonSelect(null);
+    showError(el.addError, recoveryMessage(rec) || CREATE_UNCERTAIN_MSG);
+  } else {
+    el.addExistingWrap.classList.add('hidden');
   }
-  el.addExistingWrap.classList.add('hidden');
   updateParentRoleVisibility('', null);
   el.addContext.textContent = addContextText('first');
   showRecoveryGuidance();
@@ -1174,9 +1224,14 @@ async function submitAdd(event) {
         return;
       }
       // Explicit ID choice only — never inferred from name.
-      if (relation === 'father') ensureParentSlot(anchor, 'father_id', existing.id);
-      if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', existing.id);
-      await bindPerson(existing, relation, anchor);
+      if (!isFirst) {
+        if (relation === 'father') ensureParentSlot(anchor, 'father_id', existing.id);
+        if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', existing.id);
+        await bindPerson(existing, relation, anchor);
+      } else {
+        state.rootId = String(existing.id);
+        localStorage.setItem(ROOT_KEY, state.rootId);
+      }
       try {
         await finishAddSuccess(existing);
       } catch (loadErr) {
@@ -1262,6 +1317,17 @@ async function submitAdd(event) {
         showError(el.addError, '请先写下这位亲人的名字。');
         return;
       }
+      // Ensure tree scope before durable inflight — empty list login cannot invent it.
+      try {
+        await ensureCurrentTreeId();
+      } catch (scopeErr) {
+        showError(el.addError, scopeErr.message || '还没拿到本谱编号，请重新登录后再试。');
+        return;
+      }
+      if (!state.treeId) {
+        showError(el.addError, '还没拿到本谱编号，请重新登录后再试。');
+        return;
+      }
       // Durable inflight marker before POST so refresh mid-create cannot orphan identity intent.
       writeRecovery(buildRecoveryDraft({
         target: null,
@@ -1291,6 +1357,10 @@ async function submitAdd(event) {
           return;
         }
         // Network / parse / unknown outcome — do not clear; no auto POST; no name adopt.
+        try {
+          await loadPersons();
+          await ensureCurrentTreeId();
+        } catch (_) { /* keep going to persist uncertain */ }
         writeRecovery(buildRecoveryDraft({
           target: null,
           kinKey,
@@ -1302,10 +1372,7 @@ async function submitAdd(event) {
           message: CREATE_UNCERTAIN_MSG,
           clientOpId,
         }));
-        try {
-          await loadPersons();
-          prepareUncertainPersonSelect(anchor);
-        } catch (_) { /* keep uncertain recovery */ }
+        prepareUncertainPersonSelect(anchor);
         state.mode = 'add';
         el.formAdd.classList.remove('hidden');
         showError(el.addError, CREATE_UNCERTAIN_MSG);
