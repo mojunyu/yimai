@@ -143,7 +143,7 @@ function updateStats() {
     el.stats.textContent = '家里还没有记下亲人';
     return;
   }
-  el.stats.textContent = `这本家谱里现有 ${c.nodes} 位亲人，${c.parent} 门亲子，${c.spouse} 对夫妻`;
+  el.stats.innerHTML = `<span class="stat"><strong>${c.nodes}</strong>位亲人</span><span class="stat"><strong>${c.parent}</strong>门亲子</span><span class="stat"><strong>${c.spouse}</strong>对夫妻</span>`;
 }
 
 function setAuthed(on) {
@@ -334,6 +334,9 @@ function render() {
   const edges = tree?.edges || [];
 
   el.empty.classList.toggle('hidden', nodes.length > 0);
+  document.getElementById('empty-hint').textContent = state.token
+    ? '家里还没有记下亲人。点右上角「添一位家人」，写下第一位就好。'
+    : '用上方预填的演示账号登录，翻开这本家谱。';
   setAuthed(Boolean(state.token));
 
   const svg = d3.select(el.canvas);
@@ -342,32 +345,29 @@ function render() {
   const wrap = el.canvas.parentElement;
   const width = wrap.clientWidth || 800;
   const height = wrap.clientHeight || 600;
-  svg.attr('viewBox', `0 0 ${width} ${height}`);
-
-  wrap.querySelectorAll('.legend').forEach((n) => n.remove());
   if (nodes.length === 0) return;
-
-  const legend = document.createElement('div');
-  legend.className = 'legend';
-  legend.textContent = '实线是父母与子女，虚线是夫妻。点名字可以查看、添亲人。';
-  wrap.appendChild(legend);
 
   const byGen = d3.group(nodes, (d) => d.generation);
   const gens = Array.from(byGen.keys()).sort((a, b) => a - b);
-  const cardW = 140;
-  const cardH = 56;
-  const yGap = Math.max(100, Math.min(140, (height - 80) / Math.max(gens.length, 1)));
+  const cardW = 176;
+  const cardH = 94;
+  const rowGap = 46;
+  const sceneWidth = Math.max(width, d3.max(Array.from(byGen.values()), (row) => row.length) * (cardW + 28) + 20);
+  const sceneHeight = Math.max(height, gens.length * (cardH + rowGap) + 30);
+  const yGap = Math.min(164, (sceneHeight - 60) / Math.max(gens.length, 1));
+  const top = Math.max(30, (sceneHeight - ((gens.length - 1) * yGap + cardH)) / 2);
+  svg.attr('viewBox', `0 0 ${sceneWidth} ${sceneHeight}`);
   const positions = new Map();
 
   gens.forEach((g, gi) => {
     const row = byGen.get(g);
-    const y = 48 + gi * yGap;
-    const gap = Math.min(48, (width - 40 - row.length * cardW) / Math.max(row.length + 1, 1));
-    const totalW = row.length * cardW + (row.length - 1) * Math.max(gap, 24);
-    let x = Math.max(20, (width - totalW) / 2);
+    const y = top + gi * yGap;
+    const gap = Math.max(28, Math.min(58, (sceneWidth - 48 - row.length * cardW) / Math.max(row.length + 1, 1)));
+    const totalW = row.length * cardW + (row.length - 1) * gap;
+    let x = (sceneWidth - totalW) / 2;
     row.forEach((n) => {
       positions.set(n.id, { x, y, node: n });
-      x += cardW + Math.max(gap, 24);
+      x += cardW + gap;
     });
   });
 
@@ -403,7 +403,11 @@ function render() {
   const cards = gRoot.selectAll('g.node-card')
     .data(nodes, (d) => d.id)
     .join('g')
-    .attr('class', (d) => `node-card${sameId(d.id, tree.root_id) ? ' root' : ''}`)
+    .attr('class', (d) => `node-card${sameId(d.id, tree.root_id) ? ' root' : ''}${sameId(d.id, state.selectedId) ? ' selected' : ''}`)
+    .attr('tabindex', 0)
+    .attr('role', 'button')
+    .attr('aria-label', (d) => `${d.name}，${yearsLabel(d)}，查看小传`)
+    .attr('aria-pressed', (d) => String(sameId(d.id, state.selectedId)))
     .attr('transform', (d) => {
       const p = positions.get(d.id);
       return `translate(${p.x},${p.y})`;
@@ -412,28 +416,39 @@ function render() {
     .on('click', (event, d) => {
       event.stopPropagation();
       openSheet(findPerson(d.id) || d);
+    })
+    .on('keydown', (event, d) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openSheet(findPerson(d.id) || d);
+      }
     });
 
-  cards.append('rect').attr('width', cardW).attr('height', cardH).attr('rx', 6);
+  cards.append('title').text((d) => `${d.name} · ${yearsLabel(d)}`);
+  cards.append('rect').attr('class', 'node-paper').attr('width', cardW).attr('height', cardH).attr('rx', 3);
+  const viewpoint = cards.filter((d) => sameId(d.id, tree.root_id));
+  viewpoint.append('rect').attr('class', 'view-mark').attr('x', 15).attr('y', 12).attr('width', 4).attr('height', 4);
+  viewpoint.append('text').attr('class', 'view-label').attr('x', 24).attr('y', 18).text('当前视角');
   cards.append('text')
-    .attr('x', 10)
-    .attr('y', 22)
-    .attr('font-size', 14)
-    .attr('font-weight', 600)
+    .attr('class', 'person-name')
+    .attr('x', 15)
+    .attr('y', 49)
+    .attr('font-size', (d) => Array.from(d.name).length > 5 ? 17 : 22)
     .text((d) => {
-      const g = genderGlyph(d.gender);
-      return g ? `${d.name}  ${g}` : d.name;
+      const characters = Array.from(d.name);
+      return characters.length > 7 ? `${characters.slice(0, 6).join('')}…` : d.name;
     });
+  cards.append('text')
+    .attr('class', 'gender')
+    .attr('x', cardW - 15)
+    .attr('y', 18)
+    .attr('text-anchor', 'end')
+    .text((d) => genderGlyph(d.gender));
   cards.append('text')
     .attr('class', 'meta')
-    .attr('x', 10)
-    .attr('y', 42)
+    .attr('x', 15)
+    .attr('y', 76)
     .text((d) => yearsLabel(d));
-
-  if (state.selectedId && state.mode === 'detail') {
-    const sel = findPerson(state.selectedId);
-    if (sel) openSheet(sel);
-  }
 }
 
 function relationsFromEdges(personId) {
@@ -493,6 +508,8 @@ function showAddForm({ relation = '', anchor = null, chooseRelation = false } = 
   el.sheetDetail.classList.add('hidden');
   el.formAdd.classList.remove('hidden');
   el.sheetTitle.textContent = '添一位家人';
+  document.getElementById('sheet-kicker').textContent = '续写家谱';
+  d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
   el.formAdd.reset();
   el.addGender.value = defaultGenderFor(relation, anchor);
   if (el.addSiblingRole) el.addSiblingRole.value = '';
@@ -511,15 +528,22 @@ function showAddForm({ relation = '', anchor = null, chooseRelation = false } = 
     el.addRelationWrap.classList.add('hidden');
   }
   updateParentRoleVisibility();
+  el.sheet.scrollTop = 0;
+  el.addName.focus();
 }
 
 function openSheet(node) {
+  const personChanged = state.mode !== 'detail' || !sameId(state.selectedId, node.id);
   state.mode = 'detail';
   state.selectedId = node.id;
   el.formAdd.classList.add('hidden');
   el.sheetDetail.classList.remove('hidden');
   el.sheet.classList.remove('hidden');
   el.sheetTitle.textContent = node.name;
+  document.getElementById('sheet-kicker').textContent = '家人小传';
+  d3.select(el.canvas).selectAll('.node-card')
+    .classed('selected', (d) => sameId(d.id, node.id))
+    .attr('aria-pressed', (d) => String(sameId(d.id, node.id)));
   el.setRoot.textContent = `从「${node.name}」看这棵家谱`;
   el.addSpouse.textContent = spouseButtonLabel(node);
   showError(el.sheetError, '');
@@ -534,7 +558,7 @@ function openSheet(node) {
   const siblingLine = siblings.length ? `兄弟姐妹有${namesOf(siblings)}。` : '兄弟姐妹还没有记下。';
   const spouseLine = rel.spouses.length ? `配偶是${namesOf(rel.spouses)}。` : '配偶还没有记下。';
   const childLine = rel.children.length ? `子女有${namesOf(rel.children)}。` : '子女还没有记下。';
-  el.sheetSummary.innerHTML = `<p>${intro}</p><p class="muted">${parentsLine}${siblingLine}${spouseLine}${childLine}</p>`;
+  el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>`;
   el.setRoot.dataset.personId = String(node.id);
 
   const record = findPerson(node.id) || {};
@@ -555,6 +579,7 @@ function openSheet(node) {
   });
   el.spouseStart.value = '';
   el.spouseEnd.value = '';
+  if (personChanged) el.sheet.scrollTop = 0;
 }
 
 function closeSheet() {
@@ -562,6 +587,7 @@ function closeSheet() {
   state.mode = 'detail';
   state.addIntent = { relation: '', anchorId: null };
   el.sheet.classList.add('hidden');
+  d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
   el.formAdd.classList.add('hidden');
   el.sheetDetail.classList.remove('hidden');
   showError(el.addError, '');
@@ -765,9 +791,10 @@ el.addRelation.addEventListener('change', () => {
 el.formAdd.addEventListener('submit', (event) => submitAdd(event));
 el.formParents.addEventListener('submit', (event) => submitParents(event));
 el.formSpouse.addEventListener('submit', (event) => submitSpouse(event));
-window.addEventListener('resize', () => {
-  if (state.tree) render();
-});
+// The paper also changes size when the biography opens or closes.
+new ResizeObserver(() => render()).observe(el.canvas.parentElement);
+
+render();
 
 if (state.token) {
   setAuthed(true);
