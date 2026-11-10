@@ -38,4 +38,6 @@ The runner **fails** if:
 
 - any logged assertion fails
 - a setup/test/teardown throws (aborted suite ≠ green)
-- the number of logged results ≠ `EXPECTED_TEST_COUNT` (19)
+- the number of logged results ≠ `EXPECTED_TEST_COUNT` (20)
+
+Coverage includes: login/reload/persisted token, empty-tree first person (including stale `yimai_root_id`), parent/child/spouse/sibling, existing-person bind, missing-sibling-parent guard, persistent partial-save message, retry without duplicate POST, double-submit, parent overwrite block, idempotent same-parent bind.
