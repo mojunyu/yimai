@@ -223,6 +223,61 @@ function generationFor(relation, anchor) {
   return 1;
 }
 
+async function loadPersons() {
+  if (!state.token) {
+    state.persons = [];
+    return;
+  }
+  const list = await api('/persons');
+  state.persons = list.data || [];
+}
+
+async function login() {
+  const body = {
+    email: el.email.value.trim(),
+    password: el.password.value,
+  };
+  const data = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(async (res) => {
+    if (!res.ok) throw new Error('账号或密码不对，请再试一次。');
+    return res.json();
+  });
+
+  state.token = data.token;
+  localStorage.setItem(TOKEN_KEY, state.token);
+  setAuthed(true);
+
+  await loadPersons();
+  if (!state.rootId && state.persons[0]) {
+    state.rootId = String(state.persons[0].id);
+    localStorage.setItem(ROOT_KEY, state.rootId);
+  }
+
+  await loadTree();
+}
+
+async function loadTree() {
+  if (!state.token) return;
+  await loadPersons();
+  if (!state.rootId) {
+    state.tree = { root_id: null, nodes: [], edges: [] };
+    render();
+    return;
+  }
+
+  state.tree = await api(`/persons/${state.rootId}/tree`);
+  state.rootId = String(state.tree.root_id);
+  localStorage.setItem(ROOT_KEY, state.rootId);
+  render();
+  if (state.selectedId && state.mode === 'detail') {
+    const person = findPerson(state.selectedId);
+    if (person) openSheet(person);
+  }
+}
+
 function childParentRole(anchor) {
   if (anchor?.gender === 'female') return 'mother';
   return 'father';
