@@ -51,6 +51,7 @@ const el = {
   addMother: document.getElementById('btn-add-mother'),
   addSpouse: document.getElementById('btn-add-spouse'),
   addChild: document.getElementById('btn-add-child'),
+  addSibling: document.getElementById('btn-add-sibling'),
   addName: document.getElementById('add-name'),
   addGender: document.getElementById('add-gender'),
   addBirthYear: document.getElementById('add-birth-year'),
@@ -61,6 +62,8 @@ const el = {
   addRelation: document.getElementById('add-relation'),
   addParentRoleWrap: document.getElementById('add-parent-role-wrap'),
   addParentRole: document.getElementById('add-parent-role'),
+  addSiblingRoleWrap: document.getElementById('add-sibling-role-wrap'),
+  addSiblingRole: document.getElementById('add-sibling-role'),
   addError: document.getElementById('add-error'),
   fatherId: document.getElementById('father-id'),
   motherId: document.getElementById('mother-id'),
@@ -221,7 +224,7 @@ function generationFor(relation, anchor) {
   const current = Number(anchor?.generation) || 1;
   if (relation === 'father' || relation === 'mother') return Math.max(1, current - 1);
   if (relation === 'child') return current + 1;
-  if (relation === 'spouse') return current;
+  if (relation === 'spouse' || relation === 'sibling') return current;
   return 1;
 }
 
@@ -239,11 +242,21 @@ function childParentRole(anchor) {
   return el.addParentRole.value || 'father';
 }
 
+function hasKnownParent(person) {
+  return Boolean(person && (person.father_id != null || person.mother_id != null));
+}
+
+function missingParentsMessage(anchor) {
+  const name = anchor?.name ? `「${anchor.name}」` : '这位亲人';
+  return `要先给${name}记下父亲或母亲，才能把兄弟姐妹连在同一房里。`;
+}
+
 function updateParentRoleVisibility() {
   const relation = state.addIntent.relation || el.addRelation.value;
   const anchor = findPerson(state.addIntent.anchorId || el.addAnchor.value);
-  const needChoice = relation === 'child' && anchor && !anchor.gender || relation === 'child' && anchor?.gender === 'unknown';
+  const needChoice = relation === 'child' && Boolean(anchor) && (anchor.gender === 'unknown' || !anchor.gender);
   el.addParentRoleWrap.classList.toggle('hidden', !needChoice);
+  el.addSiblingRoleWrap.classList.toggle('hidden', relation !== 'sibling');
 }
 
 async function loadPersons() {
@@ -441,6 +454,20 @@ function relationsFromEdges(personId) {
   return { parents, children, spouses };
 }
 
+function siblingsOf(personId) {
+  const parentIds = relationsFromEdges(personId).parents.map((p) => p.id);
+  if (parentIds.length === 0) return [];
+  const childIds = [];
+  for (const edge of state.tree?.edges || []) {
+    if (edge.type !== 'parent') continue;
+    if (!parentIds.some((id) => sameId(id, edge.from))) continue;
+    if (sameId(edge.to, personId)) continue;
+    const key = String(edge.to);
+    if (!childIds.includes(key)) childIds.push(key);
+  }
+  return childIds.map((id) => findPerson(id)).filter(Boolean);
+}
+
 function addContextText(relation, anchor) {
   if (!anchor) return '先把这位亲人的名字记下来。若已经知道和家里谁有关系，也可以一起选上。';
   const name = `「${anchor.name}」`;
@@ -450,6 +477,7 @@ function addContextText(relation, anchor) {
   if (relation === 'spouse' && anchor.gender === 'female') return `给${name}添一位丈夫。`;
   if (relation === 'spouse') return `给${name}添一位配偶。`;
   if (relation === 'child') return `给${name}添一个孩子。`;
+  if (relation === 'sibling') return `给${name}添一位兄弟姐妹。会记到和${name}同一位父亲或母亲名下。`;
   return `给${name}添一位亲人。`;
 }
 
@@ -467,6 +495,7 @@ function showAddForm({ relation = '', anchor = null, chooseRelation = false } = 
   el.sheetTitle.textContent = '添一位家人';
   el.formAdd.reset();
   el.addGender.value = defaultGenderFor(relation, anchor);
+  if (el.addSiblingRole) el.addSiblingRole.value = '';
   el.addContext.textContent = addContextText(relation, anchor);
   showError(el.addError, '');
 
@@ -500,10 +529,12 @@ function openSheet(node) {
   const intro = gender
     ? `${escapeHtml(node.name)}，${gender}。${lifeSentence(node)}。`
     : `${escapeHtml(node.name)}。${lifeSentence(node)}。`;
+  const siblings = siblingsOf(node.id);
   const parentsLine = rel.parents.length ? `父母是${namesOf(rel.parents)}。` : '父母还没有记下。';
+  const siblingLine = siblings.length ? `兄弟姐妹有${namesOf(siblings)}。` : '兄弟姐妹还没有记下。';
   const spouseLine = rel.spouses.length ? `配偶是${namesOf(rel.spouses)}。` : '配偶还没有记下。';
   const childLine = rel.children.length ? `子女有${namesOf(rel.children)}。` : '子女还没有记下。';
-  el.sheetSummary.innerHTML = `<p>${intro}</p><p class="muted">${parentsLine}${spouseLine}${childLine}</p>`;
+  el.sheetSummary.innerHTML = `<p>${intro}</p><p class="muted">${parentsLine}${siblingLine}${spouseLine}${childLine}</p>`;
   el.setRoot.dataset.personId = String(node.id);
 
   const record = findPerson(node.id) || {};
@@ -587,6 +618,19 @@ async function bindNewPerson(created, relation, anchor) {
       method: 'PATCH',
       body: JSON.stringify(payload),
     });
+    return;
+  }
+  if (relation === 'sibling') {
+    if (!hasKnownParent(anchor)) {
+      throw new Error(missingParentsMessage(anchor));
+    }
+    const payload = {};
+    if (anchor.father_id != null) payload.father_id = Number(anchor.father_id);
+    if (anchor.mother_id != null) payload.mother_id = Number(anchor.mother_id);
+    await api(`/persons/${created.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
   }
 }
 
@@ -603,6 +647,10 @@ async function submitAdd(event) {
   };
   if (!payload.name) {
     showError(el.addError, '请先写下这位亲人的名字。');
+    return;
+  }
+  if (relation === 'sibling' && !hasKnownParent(anchor)) {
+    showError(el.addError, missingParentsMessage(anchor));
     return;
   }
   try {
@@ -683,6 +731,10 @@ async function submitSpouse(event) {
 function startAddFor(relation) {
   const anchor = findPerson(state.selectedId);
   if (!anchor) return;
+  if (relation === 'sibling' && !hasKnownParent(anchor)) {
+    showError(el.sheetError, missingParentsMessage(anchor));
+    return;
+  }
   showAddForm({ relation, anchor, chooseRelation: false });
 }
 
@@ -696,6 +748,10 @@ el.addFather.addEventListener('click', () => startAddFor('father'));
 el.addMother.addEventListener('click', () => startAddFor('mother'));
 el.addSpouse.addEventListener('click', () => startAddFor('spouse'));
 el.addChild.addEventListener('click', () => startAddFor('child'));
+el.addSibling.addEventListener('click', () => startAddFor('sibling'));
+el.addSiblingRole.addEventListener('change', () => {
+  if (el.addSiblingRole.value) el.addGender.value = el.addSiblingRole.value;
+});
 el.addAnchor.addEventListener('change', updateParentRoleVisibility);
 el.addRelation.addEventListener('change', () => {
   const anchor = findPerson(el.addAnchor.value);
@@ -703,6 +759,7 @@ el.addRelation.addEventListener('change', () => {
   state.addIntent = { relation, anchorId: anchor ? anchor.id : null };
   el.addContext.textContent = addContextText(relation, anchor);
   if (relation) el.addGender.value = defaultGenderFor(relation, anchor);
+  if (el.addSiblingRole) el.addSiblingRole.value = '';
   updateParentRoleVisibility();
 });
 el.formAdd.addEventListener('submit', (event) => submitAdd(event));

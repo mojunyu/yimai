@@ -62,9 +62,17 @@
               <option value="mother">是TA的母亲</option>
               <option value="spouse">是TA的配偶</option>
               <option value="child">是TA的孩子</option>
+              <option value="sibling">是TA的兄弟姐妹</option>
             </select>
           </label>
         </div>
+        <label id="add-sibling-role-wrap" class="hidden">是TA的
+          <select id="add-sibling-role">
+            <option value="">兄弟姐妹（性别先不填）</option>
+            <option value="male">哥哥或弟弟</option>
+            <option value="female">姐姐或妹妹</option>
+          </select>
+        </label>
         <label id="add-parent-role-wrap" class="hidden">孩子这边，把目前这位记为
           <select id="add-parent-role">
             <option value="father">父亲</option>
@@ -90,6 +98,7 @@
           <button type="button" id="btn-add-mother" class="ghost">添母亲</button>
           <button type="button" id="btn-add-spouse" class="ghost">添配偶</button>
           <button type="button" id="btn-add-child" class="ghost">添孩子</button>
+          <button type="button" id="btn-add-sibling" class="ghost">添兄弟姐妹</button>
         </div>
 
         <h3 class="form-heading">在现有家人里认亲</h3>
