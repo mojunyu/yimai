@@ -92,6 +92,7 @@
           <section class="sheet-section" id="add-section">
             <h3 class="form-heading">添加</h3>
             <p class="section-hint" id="add-hint">选中当前人后，点一种关系，写下名字即可。</p>
+            <p class="section-hint" id="add-anchor-label" hidden></p>
             <div class="kin-grid" id="kin-grid" role="group" aria-label="添加亲人">
               <button type="button" data-kin="father">父</button>
               <button type="button" data-kin="mother">母</button>
@@ -107,17 +108,24 @@
 
             <form id="form-add" class="form-stack add-form hidden">
               <p id="add-context" class="form-lead"></p>
-              <label>叫什么<input id="add-name" type="text" maxlength="64" required placeholder="例如：张素芬" /></label>
+              <label class="add-name-emphasis">叫什么（必填）<input id="add-name" type="text" maxlength="64" required placeholder="例如：张素芬" /></label>
               <div class="form-pair">
-                <label>哪一年出生的<input id="add-birth-year" type="number" min="1" max="9999" placeholder="记不清就空着" /></label>
-                <label>若已去世，是哪一年<input id="add-death-year" type="number" min="1" max="9999" placeholder="还在世就空着" /></label>
+                <label>哪一年出生的（可空）<input id="add-birth-year" type="number" min="1" max="9999" placeholder="记不清就空着" /></label>
+                <label>若已去世，是哪一年（可空）<input id="add-death-year" type="number" min="1" max="9999" placeholder="还在世就空着" /></label>
               </div>
+              <label id="add-parent-role-wrap" class="hidden">这位是孩子的
+                <select id="add-parent-role">
+                  <option value="">请选择父亲或母亲</option>
+                  <option value="father">父亲</option>
+                  <option value="mother">母亲</option>
+                </select>
+              </label>
               <label id="add-existing-wrap">或者，这位已经在谱里
                 <select id="add-existing"></select>
               </label>
               <p id="add-error" class="form-error hidden" role="alert"></p>
               <div class="sheet-actions add-actions">
-                <button type="submit">记下</button>
+                <button type="submit" id="btn-submit-add">记下</button>
                 <button type="button" id="btn-cancel-add" class="ghost">先不添了</button>
               </div>
             </form>

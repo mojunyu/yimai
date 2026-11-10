@@ -16,17 +16,31 @@ const ERROR_ZH = {
   'An open spouse link already exists for this pair.': '这两位已经记过还在续的夫妻关系了。',
   'death_year must be greater than or equal to birth_year.': '去世的年份不能早于出生的年份。',
   'end_year must be greater than or equal to start_year.': '结束的年份不能早于成亲的年份。',
+  'Parent slot already set; refusing silent overwrite.': '这位已经记过这位父母了，不能悄悄改成别人。',
 };
+
+const USER_KEY = 'yimai_user_id';
+const TREE_KEY = 'yimai_tree_id';
+const RECOVERY_KEY = 'yimai_add_recovery';
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
+  userId: localStorage.getItem(USER_KEY) || '',
+  treeId: localStorage.getItem(TREE_KEY) || '',
   rootId: localStorage.getItem(ROOT_KEY) || '',
   tree: null,
   persons: [],
   selectedId: null,
   mode: 'detail',
-  addIntent: { relation: '', anchorId: null },
+  saving: false,
+  recovery: null,
+  addIntent: { relation: '', anchorId: null, kin: '', pendingPersonId: null, parentRole: '' },
 };
+
+const PARTIAL_SAVE_MSG = '人已记下，关系未保存';
+const DISPLAY_LOAD_FAIL_MSG = '人已记下且关系已保存，但画面没有刷新成功。请再点记下或重新载入，不会重复添加。';
+const CREATE_UNCERTAIN_MSG = '刚才的记下结果还不确定（可能已保存但回信丢失）。同名不会自动合并。请在下拉框明确选择一位已有亲人，或选「确认新建」；确认之前不会自动绑关系或再次新建。';
+const CONFIRM_NEW_VALUE = '__confirm_new__';
 
 const KIN = {
   father: { relation: 'father', gender: 'male', word: '父亲' },
@@ -66,9 +80,13 @@ const el = {
   addContext: document.getElementById('add-context'),
   addExisting: document.getElementById('add-existing'),
   addExistingWrap: document.getElementById('add-existing-wrap'),
+  addParentRoleWrap: document.getElementById('add-parent-role-wrap'),
+  addParentRole: document.getElementById('add-parent-role'),
   addError: document.getElementById('add-error'),
   sheetError: document.getElementById('sheet-error'),
   addSection: document.getElementById('add-section'),
+  addAnchorLabel: document.getElementById('add-anchor-label'),
+  submitAdd: document.getElementById('btn-submit-add'),
   perspectiveAction: document.querySelector('.perspective-action'),
   perspectiveNote: document.querySelector('.perspective-note'),
 };
@@ -105,21 +123,55 @@ function showError(node, message) {
   node.classList.remove('hidden');
 }
 
+function makeApiError(message, { status = 0, body = null, uncertain = false } = {}) {
+  const err = new Error(message);
+  err.name = 'ApiError';
+  err.status = status;
+  err.body = body;
+  err.uncertain = Boolean(uncertain);
+  return err;
+}
+
+function isDefiniteClientRejection(err) {
+  const status = Number(err?.status || 0);
+  return status === 422 || status === 401 || status === 403 || status === 404 || status === 409;
+}
+
 async function api(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: { ...authHeaders(), ...(options.headers || {}) },
-  });
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: { ...authHeaders(), ...(options.headers || {}) },
+    });
+  } catch (networkErr) {
+    throw makeApiError(networkErr?.message || '网络异常，结果不确定。', {
+      status: 0,
+      uncertain: true,
+    });
+  }
   if (!res.ok) {
     let detail = '没有保存成功，请再试一次。';
+    let body = null;
     try {
-      const body = await res.json();
+      body = await res.json();
       detail = formatApiError(body, detail);
-    } catch (_) { /* ignore */ }
-    throw new Error(detail);
+    } catch (_) { /* keep fallback detail */ }
+    throw makeApiError(detail, {
+      status: res.status,
+      body,
+      uncertain: false,
+    });
   }
   if (res.status === 204) return null;
-  return res.json();
+  try {
+    return await res.json();
+  } catch (_) {
+    throw makeApiError('服务器回信无法解析，结果不确定。', {
+      status: res.status,
+      uncertain: true,
+    });
+  }
 }
 
 function countEdges(tree) {
@@ -223,9 +275,288 @@ function generationFor(relation, anchor) {
   return 1;
 }
 
+function emptyIntent(extra = {}) {
+  return {
+    relation: '',
+    anchorId: null,
+    kin: '',
+    pendingPersonId: null,
+    parentRole: '',
+    ...extra,
+  };
+}
+
+function readRecoveryRaw() {
+  try {
+    const raw = localStorage.getItem(RECOVERY_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function recoveryScopedOk(rec) {
+  if (!rec || !state.userId || !state.treeId) return false;
+  if (!rec.userId || !sameId(rec.userId, state.userId)) return false;
+  // Missing tree id must not authorize applying recovery across trees.
+  if (!rec.treeId || !sameId(rec.treeId, state.treeId)) return false;
+  return true;
+}
+
+/**
+ * MVP: one tree per user. Empty accounts never learn treeId from an empty
+ * person list — fetch /trees/current so recovery/create always own a scope.
+ * force=true on login so a prior session's treeId cannot stick to a new account.
+ */
+async function ensureCurrentTreeId({ force = false } = {}) {
+  if (!state.token) return '';
+  if (state.treeId && !force) return state.treeId;
+  const tree = await api('/trees/current');
+  if (tree?.id != null) {
+    state.treeId = String(tree.id);
+    localStorage.setItem(TREE_KEY, state.treeId);
+  }
+  return state.treeId;
+}
+
+function writeRecovery(rec) {
+  if (!rec) {
+    localStorage.removeItem(RECOVERY_KEY);
+    state.recovery = null;
+    return;
+  }
+  const payload = {
+    ...rec,
+    userId: String(state.userId || rec.userId || ''),
+    treeId: String(state.treeId || rec.treeId || ''),
+  };
+  localStorage.setItem(RECOVERY_KEY, JSON.stringify(payload));
+  state.recovery = payload;
+}
+
+function clearRecovery() {
+  writeRecovery(null);
+  state.addIntent.pendingPersonId = null;
+}
+
+function recoveryMessage(rec = state.recovery) {
+  if (!rec) return '';
+  if (rec.phase === 'display_load_failed') {
+    return rec.message || DISPLAY_LOAD_FAIL_MSG;
+  }
+  return rec.message || PARTIAL_SAVE_MSG;
+}
+
+function showRecoveryGuidance() {
+  const rec = state.recovery;
+  if (!rec || !recoveryScopedOk(rec)) return;
+  const msg = recoveryMessage(rec);
+  showError(el.sheetError, msg);
+  if (el.formAdd && !el.formAdd.classList.contains('hidden')) {
+    showError(el.addError, msg);
+  }
+}
+
+function syncTreeIdFromPersons() {
+  const fromPerson = state.persons.find((p) => p.tree_id != null);
+  if (fromPerson?.tree_id != null) {
+    state.treeId = String(fromPerson.tree_id);
+    localStorage.setItem(TREE_KEY, state.treeId);
+  }
+}
+
+async function loadPersons() {
+  if (!state.token) {
+    state.persons = [];
+    return;
+  }
+  const list = await api('/persons');
+  state.persons = list.data || [];
+  syncTreeIdFromPersons();
+}
+
+async function fetchPersonById(id) {
+  return api(`/persons/${id}`);
+}
+
+function newClientOpId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return `op-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function isCreateUnresolvedPhase(phase) {
+  return phase === 'create_inflight' || phase === 'create_uncertain';
+}
+
+function syncRootWithPersons() {
+  if (state.persons.length === 0) {
+    state.rootId = '';
+    localStorage.removeItem(ROOT_KEY);
+    return;
+  }
+  const rootOk = state.rootId && state.persons.some((p) => sameId(p.id, state.rootId));
+  if (!rootOk) {
+    state.rootId = String(state.persons[0].id);
+    localStorage.setItem(ROOT_KEY, state.rootId);
+  }
+}
+
+async function loadScopedRecovery() {
+  let rec = readRecoveryRaw();
+  if (!rec) {
+    state.recovery = null;
+    return null;
+  }
+  // Cross-account: drop immediately. Never adopt foreign recovery.
+  if (!state.userId || !rec.userId || !sameId(rec.userId, state.userId)) {
+    localStorage.removeItem(RECOVERY_KEY);
+    state.recovery = null;
+    return null;
+  }
+  // Same account but empty treeId (empty-list login gap): stamp current tree
+  // after ensureCurrentTreeId. MVP is one tree per user — does not weaken
+  // cross-account isolation or allow cross-tree when rec.treeId is set.
+  if (!rec.treeId) {
+    try {
+      await ensureCurrentTreeId();
+    } catch (_) { /* keep trying scope check below */ }
+    if (state.treeId) {
+      rec = { ...rec, treeId: String(state.treeId) };
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify(rec));
+    }
+  }
+  if (recoveryScopedOk(rec)) {
+    state.recovery = rec;
+    return rec;
+  }
+  localStorage.removeItem(RECOVERY_KEY);
+  state.recovery = null;
+  return null;
+}
+
+async function resumeRecoveryUi() {
+  const rec = await loadScopedRecovery();
+  if (!rec) return;
+  showRecoveryGuidance();
+  if (rec.kin === 'first') {
+    const pending = findPerson(rec.pendingPersonId);
+    if (pending) {
+      // First person already exists — guide reload rather than create again.
+      showError(el.sheetError, recoveryMessage(rec));
+    } else if (isCreateUnresolvedPhase(rec.phase)) {
+      showFirstPersonForm();
+    }
+    return;
+  }
+  const anchor = findPerson(rec.anchorId);
+  if (anchor && KIN[rec.kin]) {
+    showAddFormForKin(rec.kin, anchor, { resume: true });
+  }
+}
+
+async function login() {
+  const body = {
+    email: el.email.value.trim(),
+    password: el.password.value,
+  };
+  const data = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(async (res) => {
+    if (!res.ok) throw new Error('账号或密码不对，请再试一次。');
+    return res.json();
+  });
+
+  state.token = data.token;
+  localStorage.setItem(TOKEN_KEY, state.token);
+  state.userId = data.user?.id != null ? String(data.user.id) : '';
+  if (state.userId) localStorage.setItem(USER_KEY, state.userId);
+  setAuthed(true);
+
+  // Acquire tree scope before any create/recovery — empty person list cannot supply it.
+  // Force refresh so a previous account's treeId cannot remain on this session.
+  await ensureCurrentTreeId({ force: true });
+  await loadPersons();
+  syncRootWithPersons();
+  await loadTree();
+  await resumeRecoveryUi();
+}
+
+async function loadTree() {
+  if (!state.token) return;
+  try {
+    await ensureCurrentTreeId();
+  } catch (_) { /* persons path may still sync later */ }
+  await loadPersons();
+  syncRootWithPersons();
+  if (!state.rootId) {
+    state.tree = { root_id: null, nodes: [], edges: [] };
+    render();
+    return;
+  }
+
+  try {
+    state.tree = await api(`/persons/${state.rootId}/tree`);
+  } catch (err) {
+    // Recover only when root is stale/foreign (not in current persons).
+    // Transient failures on a known root must surface to callers (e.g. post-save display).
+    const rootKnown = state.persons.some((p) => sameId(p.id, state.rootId));
+    if (rootKnown) throw err;
+    state.rootId = '';
+    localStorage.removeItem(ROOT_KEY);
+    syncRootWithPersons();
+    if (!state.rootId) {
+      state.tree = { root_id: null, nodes: [], edges: [] };
+      render();
+      throw err;
+    }
+    state.tree = await api(`/persons/${state.rootId}/tree`);
+  }
+  state.rootId = String(state.tree.root_id);
+  localStorage.setItem(ROOT_KEY, state.rootId);
+  render();
+  if (state.selectedId && state.mode === 'detail') {
+    const person = findPerson(state.selectedId);
+    if (person) openSheet(person);
+  }
+}
+
 function childParentRole(anchor) {
   if (anchor?.gender === 'female') return 'mother';
-  return 'father';
+  if (anchor?.gender === 'male') return 'father';
+  return state.addIntent.parentRole || el.addParentRole?.value || '';
+}
+
+function parentSlotLabel(slot) {
+  return slot === 'father_id' ? '父亲' : '母亲';
+}
+
+function ensureParentSlot(person, slot, newId) {
+  if (!person) return;
+  const current = person[slot];
+  if (current == null || current === '') return;
+  if (newId != null && sameId(current, newId)) return;
+  const name = person.name ? `「${person.name}」` : '这位亲人';
+  throw new Error(`${name}已经记过${parentSlotLabel(slot)}了，不能改成别人。`);
+}
+
+function updateAnchorLabel(anchor) {
+  if (!el.addAnchorLabel) return;
+  if (!anchor) {
+    el.addAnchorLabel.hidden = true;
+    el.addAnchorLabel.textContent = '';
+    return;
+  }
+  el.addAnchorLabel.hidden = false;
+  el.addAnchorLabel.textContent = `当前人：${anchor.name}`;
+}
+
+function updateParentRoleVisibility(relation, anchor) {
+  if (!el.addParentRoleWrap) return;
+  const need = relation === 'child' && anchor && anchor.gender !== 'male' && anchor.gender !== 'female';
+  el.addParentRoleWrap.classList.toggle('hidden', !need);
+  if (!need && el.addParentRole) el.addParentRole.value = '';
 }
 
 function hasKnownParent(person) {
@@ -256,11 +587,22 @@ function setKinPressed(kinKey) {
   });
 }
 
-function resetAddForm() {
+function resetAddForm({ preservePending = false } = {}) {
+  const pendingId = state.addIntent.pendingPersonId;
+  const parentRole = state.addIntent.parentRole;
   el.formAdd.reset();
   el.addName.required = true;
-  showError(el.addError, '');
+  if (!preservePending) showError(el.addError, '');
   if (el.addExisting) el.addExisting.value = '';
+  if (el.addParentRole) el.addParentRole.value = '';
+  if (preservePending) {
+    state.addIntent.pendingPersonId = pendingId;
+    state.addIntent.parentRole = parentRole;
+    if (el.addParentRole && parentRole) el.addParentRole.value = parentRole;
+  } else {
+    state.addIntent.pendingPersonId = null;
+    state.addIntent.parentRole = '';
+  }
 }
 
 function setFirstPersonChrome(on) {
@@ -287,22 +629,92 @@ function fillExistingSelect(anchor) {
   });
 }
 
-function showAddFormForKin(kinKey, anchor) {
-  state.addIntent = { kin: kinKey, relation: KIN[kinKey].relation, anchorId: anchor.id };
+/**
+ * Uncertain-create exit: explicit ID selection or explicit confirm-new only.
+ * Never preselect / auto-adopt by name. Options are current account/tree persons only.
+ */
+function prepareUncertainPersonSelect(anchor) {
+  if (!el.addExistingWrap || !el.addExisting) return;
+  const options = [
+    `<option value="">请明确选择（同名不会自动合并）</option>`,
+    `<option value="${CONFIRM_NEW_VALUE}">确认新建：名单里没有我要的那位</option>`,
+  ];
+  for (const person of state.persons) {
+    if (anchor && sameId(person.id, anchor.id)) continue;
+    const gender = genderWord(person.gender);
+    const label = gender ? `${person.name}（${gender}）#${person.id}` : `${person.name}#${person.id}`;
+    options.push(`<option value="${person.id}">${escapeHtml(label)}</option>`);
+  }
+  el.addExistingWrap.classList.remove('hidden');
+  el.addExisting.innerHTML = options.join('');
+  el.addExisting.value = '';
+}
+
+function showAddFormForKin(kinKey, anchor, { resume = false } = {}) {
+  const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
+  const canResume = Boolean(
+    rec
+    && rec.pendingPersonId
+    && (resume
+      || (rec.kin === kinKey && sameId(rec.anchorId, anchor.id))),
+  );
+
+  state.mode = 'add';
+  state.selectedId = anchor.id;
+  state.addIntent = emptyIntent({
+    kin: kinKey,
+    relation: KIN[kinKey].relation,
+    anchorId: anchor.id,
+    pendingPersonId: canResume ? rec.pendingPersonId : null,
+    parentRole: canResume ? (rec.parentRole || '') : '',
+  });
   setKinPressed(kinKey);
   setFirstPersonChrome(false);
+  updateAnchorLabel(anchor);
   el.formAdd.classList.remove('hidden');
-  resetAddForm();
+  resetAddForm({ preservePending: canResume });
+  state.addIntent.kin = kinKey;
+  state.addIntent.relation = KIN[kinKey].relation;
+  state.addIntent.anchorId = anchor.id;
+  if (canResume) {
+    state.addIntent.pendingPersonId = rec.pendingPersonId;
+    state.addIntent.parentRole = rec.parentRole || '';
+  }
   fillExistingSelect(anchor);
+  if (canResume && el.addExisting && rec.pendingPersonId) {
+    el.addExisting.value = String(rec.pendingPersonId);
+    el.addName.required = false;
+    el.addName.value = rec.name || el.addName.value;
+  }
+  updateParentRoleVisibility(KIN[kinKey].relation, anchor);
+  if (canResume && el.addParentRole && rec.parentRole) {
+    el.addParentRole.value = rec.parentRole;
+  }
   el.addContext.textContent = addContextText(kinKey, anchor);
+  if (canResume) {
+    showError(el.addError, recoveryMessage(rec));
+    showError(el.sheetError, recoveryMessage(rec));
+  } else if (rec && recoveryScopedOk(rec)) {
+    showError(
+      el.sheetError,
+      `${recoveryMessage(rec)}（未完成：${rec.name || '已记下的亲人'}。可回到原关系继续，或在下方选择那位已记下的亲人。）`,
+    );
+  }
   el.addName.focus();
 }
 
 function showFirstPersonForm() {
+  const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
+  const canResume = Boolean(rec && rec.kin === 'first' && rec.pendingPersonId);
+  const uncertainFirst = Boolean(rec && rec.kin === 'first' && isCreateUnresolvedPhase(rec.phase) && !rec.pendingPersonId);
   state.mode = 'add';
   state.selectedId = null;
-  state.addIntent = { kin: 'first', relation: '', anchorId: null };
+  state.addIntent = emptyIntent({
+    kin: 'first',
+    pendingPersonId: canResume ? rec.pendingPersonId : null,
+  });
   setKinPressed('');
+  updateAnchorLabel(null);
   el.sheet.classList.remove('hidden');
   el.sheetDetail.classList.remove('hidden');
   el.formAdd.classList.remove('hidden');
@@ -310,10 +722,23 @@ function showFirstPersonForm() {
   document.getElementById('sheet-kicker').textContent = '续写家谱';
   d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
   setFirstPersonChrome(true);
-  resetAddForm();
-  el.addExistingWrap.classList.add('hidden');
+  resetAddForm({ preservePending: canResume });
+  state.addIntent.kin = 'first';
+  if (canResume) {
+    state.addIntent.pendingPersonId = rec.pendingPersonId;
+    el.addName.value = rec.name || '';
+    el.addExistingWrap.classList.add('hidden');
+    showError(el.addError, recoveryMessage(rec));
+  } else if (uncertainFirst) {
+    el.addName.value = rec.name || '';
+    prepareUncertainPersonSelect(null);
+    showError(el.addError, recoveryMessage(rec) || CREATE_UNCERTAIN_MSG);
+  } else {
+    el.addExistingWrap.classList.add('hidden');
+  }
+  updateParentRoleVisibility('', null);
   el.addContext.textContent = addContextText('first');
-  showError(el.sheetError, '');
+  showRecoveryGuidance();
   el.sheet.scrollTop = 0;
   el.addName.focus();
 }
@@ -322,11 +747,19 @@ function startAddForKin(kinKey) {
   const kin = KIN[kinKey];
   const anchor = findPerson(state.selectedId);
   if (!kin || !anchor) {
-    showError(el.sheetError, '请先在树上点一位当前人，再选择要添加的关系。');
+    const base = '请先在树上点一位当前人，再选择要添加的关系。';
+    const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
+    showError(el.sheetError, rec ? `${base} ${recoveryMessage(rec)}` : base);
     return;
   }
   if (kin.relation === 'sibling' && !hasKnownParent(anchor)) {
-    showError(el.sheetError, missingParentsMessage(anchor));
+    // Do not erase durable recovery guidance when explaining the sibling prerequisite.
+    const missing = missingParentsMessage(anchor);
+    const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
+    showError(
+      el.sheetError,
+      rec ? `${missing} ${recoveryMessage(rec)}` : missing,
+    );
     el.formAdd.classList.add('hidden');
     setKinPressed('');
     return;
@@ -527,20 +960,27 @@ function openSheet(node) {
   const personChanged = state.mode !== 'detail' || !sameId(state.selectedId, node.id);
   state.mode = 'detail';
   state.selectedId = node.id;
-  state.addIntent = { relation: '', anchorId: node.id, kin: '' };
+  // Keep persisted recovery; only reset the ephemeral addIntent for detail view.
+  const pendingId = state.recovery?.pendingPersonId ?? null;
+  state.addIntent = emptyIntent({
+    anchorId: node.id,
+    pendingPersonId: pendingId,
+    parentRole: state.recovery?.parentRole || '',
+  });
   el.sheetDetail.classList.remove('hidden');
   el.sheet.classList.remove('hidden');
   el.formAdd.classList.add('hidden');
   setFirstPersonChrome(false);
   setKinPressed('');
+  updateAnchorLabel(node);
   el.sheetTitle.textContent = node.name;
   document.getElementById('sheet-kicker').textContent = '家人小传';
   d3.select(el.canvas).selectAll('.node-card')
     .classed('selected', (d) => sameId(d.id, node.id))
     .attr('aria-pressed', (d) => String(sameId(d.id, node.id)));
   el.setRoot.textContent = `从「${node.name}」看这棵家谱`;
-  showError(el.sheetError, '');
   showError(el.addError, '');
+  showError(el.sheetError, '');
 
   const rel = relationsFromEdges(node.id);
   const gender = genderWord(node.gender);
@@ -555,35 +995,49 @@ function openSheet(node) {
   el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>`;
   el.setRoot.dataset.personId = String(node.id);
   if (personChanged) el.sheet.scrollTop = 0;
+  showRecoveryGuidance();
 }
 
 function closeSheet() {
-  const wasFirst = state.addIntent.kin === 'first';
+  const wasFirst = state.addIntent.kin === 'first' && !state.recovery;
   state.selectedId = null;
   state.mode = 'detail';
-  state.addIntent = { relation: '', anchorId: null, kin: '' };
+  state.addIntent = emptyIntent({
+    pendingPersonId: state.recovery?.pendingPersonId ?? null,
+    parentRole: state.recovery?.parentRole || '',
+  });
   el.formAdd.classList.add('hidden');
   setKinPressed('');
   setFirstPersonChrome(false);
+  updateAnchorLabel(null);
   showError(el.addError, '');
   showError(el.sheetError, '');
   if (wasFirst || !findPerson(state.selectedId)) {
-    el.sheet.classList.add('hidden');
+    if (!state.recovery) el.sheet.classList.add('hidden');
   }
   d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
+  showRecoveryGuidance();
 }
 
 function cancelAdd() {
-  if (state.addIntent.kin === 'first' && state.persons.length === 0) {
+  if (state.addIntent.kin === 'first' && state.persons.length === 0 && !state.recovery?.pendingPersonId) {
     closeSheet();
     return;
   }
-  const anchor = findPerson(state.selectedId) || findPerson(state.addIntent.anchorId);
+  const anchor = findPerson(state.selectedId) || findPerson(state.addIntent.anchorId) || findPerson(state.recovery?.anchorId);
   el.formAdd.classList.add('hidden');
   setKinPressed('');
-  state.addIntent = { relation: '', anchorId: anchor ? anchor.id : null, kin: '' };
+  state.addIntent = emptyIntent({
+    anchorId: anchor ? anchor.id : null,
+    pendingPersonId: state.recovery?.pendingPersonId ?? null,
+    parentRole: state.recovery?.parentRole || '',
+  });
   showError(el.addError, '');
   if (anchor) openSheet(anchor);
+  else {
+    showRecoveryGuidance();
+    if (state.persons.length === 0 && !state.recovery) closeSheet();
+  }
 }
 
 async function setAsRoot() {
@@ -596,122 +1050,461 @@ async function setAsRoot() {
 
 async function bindPerson(target, relation, anchor) {
   if (!relation || !anchor || !target) return;
+  // Refresh local person records so slot checks see latest father_id/mother_id.
+  const liveAnchor = findPerson(anchor.id) || anchor;
+  const liveTarget = findPerson(target.id) || target;
+
   if (relation === 'father') {
-    await api(`/persons/${anchor.id}`, {
+    ensureParentSlot(liveAnchor, 'father_id', liveTarget.id);
+    if (sameId(liveAnchor.father_id, liveTarget.id)) return;
+    await api(`/persons/${liveAnchor.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ father_id: target.id }),
+      body: JSON.stringify({ father_id: liveTarget.id }),
     });
     return;
   }
   if (relation === 'mother') {
-    await api(`/persons/${anchor.id}`, {
+    ensureParentSlot(liveAnchor, 'mother_id', liveTarget.id);
+    if (sameId(liveAnchor.mother_id, liveTarget.id)) return;
+    await api(`/persons/${liveAnchor.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ mother_id: target.id }),
+      body: JSON.stringify({ mother_id: liveTarget.id }),
     });
     return;
   }
   if (relation === 'spouse') {
-    await api('/spouse-links', {
-      method: 'POST',
-      body: JSON.stringify({
-        person_a_id: Number(anchor.id),
-        person_b_id: Number(target.id),
-      }),
-    });
+    try {
+      await api('/spouse-links', {
+        method: 'POST',
+        body: JSON.stringify({
+          person_a_id: Number(liveAnchor.id),
+          person_b_id: Number(liveTarget.id),
+        }),
+      });
+    } catch (err) {
+      if (String(err.message || '').includes('已经记过还在续的夫妻关系')) return;
+      throw err;
+    }
     return;
   }
   if (relation === 'child') {
-    const payload = childParentRole(anchor) === 'mother'
-      ? { mother_id: Number(anchor.id) }
-      : { father_id: Number(anchor.id) };
-    await api(`/persons/${target.id}`, {
+    const role = childParentRole(liveAnchor);
+    if (role !== 'father' && role !== 'mother') {
+      throw new Error(`还不确定「${liveAnchor.name}」是父亲还是母亲，请先选择后再添孩子。`);
+    }
+    const slot = role === 'mother' ? 'mother_id' : 'father_id';
+    ensureParentSlot(liveTarget, slot, liveAnchor.id);
+    if (sameId(liveTarget[slot], liveAnchor.id)) return;
+    const payload = role === 'mother'
+      ? { mother_id: Number(liveAnchor.id) }
+      : { father_id: Number(liveAnchor.id) };
+    await api(`/persons/${liveTarget.id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     });
     return;
   }
   if (relation === 'sibling') {
-    if (!hasKnownParent(anchor)) {
-      throw new Error(missingParentsMessage(anchor));
+    if (!hasKnownParent(liveAnchor)) {
+      throw new Error(missingParentsMessage(liveAnchor));
     }
     const payload = {};
-    if (anchor.father_id != null) payload.father_id = Number(anchor.father_id);
-    if (anchor.mother_id != null) payload.mother_id = Number(anchor.mother_id);
-    await api(`/persons/${target.id}`, {
+    if (liveAnchor.father_id != null) {
+      ensureParentSlot(liveTarget, 'father_id', liveAnchor.father_id);
+      if (!sameId(liveTarget.father_id, liveAnchor.father_id)) {
+        payload.father_id = Number(liveAnchor.father_id);
+      }
+    }
+    if (liveAnchor.mother_id != null) {
+      ensureParentSlot(liveTarget, 'mother_id', liveAnchor.mother_id);
+      if (!sameId(liveTarget.mother_id, liveAnchor.mother_id)) {
+        payload.mother_id = Number(liveAnchor.mother_id);
+      }
+    }
+    if (Object.keys(payload).length === 0) return;
+    await api(`/persons/${liveTarget.id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     });
   }
 }
 
+function setSaving(on) {
+  state.saving = on;
+  if (el.submitAdd) el.submitAdd.disabled = on;
+}
+
+function ensureRootForPerson(personId) {
+  if (!state.rootId || !state.persons.some((p) => sameId(p.id, state.rootId))) {
+    state.rootId = String(personId);
+    localStorage.setItem(ROOT_KEY, state.rootId);
+  }
+}
+
+function buildRecoveryDraft({
+  target,
+  kinKey,
+  relation,
+  anchor,
+  parentRole,
+  name,
+  phase,
+  message,
+  clientOpId,
+  allowCreate,
+}) {
+  return {
+    userId: state.userId,
+    treeId: state.treeId || target?.tree_id || '',
+    pendingPersonId: target?.id ?? null,
+    kin: kinKey,
+    relation: relation || '',
+    anchorId: anchor?.id ?? null,
+    parentRole: parentRole || '',
+    name: name || target?.name || '',
+    phase,
+    message,
+    clientOpId: clientOpId || state.recovery?.clientOpId || null,
+    allowCreate: Boolean(allowCreate),
+  };
+}
+
+/**
+ * Display/bind may still be unfinished. Durable recovery must survive the await
+ * window (refresh/navigation bypass catch). Clear only after completion.
+ */
+async function finishAddSuccess(target) {
+  await loadTree();
+  clearRecovery();
+  openSheet(findPerson(target.id) || target);
+}
+
 async function submitAdd(event) {
   event.preventDefault();
+  if (state.saving) return;
+  setSaving(true);
   showError(el.addError, '');
-  const kinKey = state.addIntent.kin;
-  const isFirst = kinKey === 'first';
-  const kin = isFirst ? null : KIN[kinKey];
-  const relation = isFirst ? '' : (kin?.relation || state.addIntent.relation);
-  const anchor = isFirst ? null : findPerson(state.addIntent.anchorId || state.selectedId);
-  if (!isFirst && (!kin || !anchor)) {
-    showError(el.addError, '请先在树上点一位当前人，再选择要添加的关系。');
-    return;
-  }
-  if (relation === 'sibling' && !hasKnownParent(anchor)) {
-    showError(el.addError, missingParentsMessage(anchor));
-    return;
-  }
-
-  const existingId = el.addExisting && !el.addExistingWrap.classList.contains('hidden')
-    ? el.addExisting.value
-    : '';
   try {
+    const kinKey = state.addIntent.kin || state.recovery?.kin || '';
+    const isFirst = kinKey === 'first';
+    const kin = isFirst ? null : KIN[kinKey];
+    const relation = isFirst ? '' : (kin?.relation || state.addIntent.relation || state.recovery?.relation || '');
+    const anchor = isFirst
+      ? null
+      : findPerson(state.addIntent.anchorId || state.selectedId || state.recovery?.anchorId);
+    if (!isFirst && (!kin || !anchor)) {
+      showError(el.addError, '请先在树上点一位当前人，再选择要添加的关系。');
+      return;
+    }
+    if (relation === 'sibling' && !hasKnownParent(anchor)) {
+      showError(el.addError, missingParentsMessage(anchor));
+      return;
+    }
+    let parentRole = '';
+    if (relation === 'child') {
+      parentRole = childParentRole(anchor) || state.recovery?.parentRole || '';
+      if (parentRole !== 'father' && parentRole !== 'mother') {
+        showError(el.addError, `还不确定「${anchor.name}」是父亲还是母亲，请先选择后再添孩子。`);
+        return;
+      }
+      state.addIntent.parentRole = parentRole;
+    }
+
+    const selectRaw = el.addExisting && !el.addExistingWrap.classList.contains('hidden')
+      ? el.addExisting.value
+      : '';
+    const confirmNew = selectRaw === CONFIRM_NEW_VALUE;
+    const existingId = confirmNew ? '' : selectRaw;
+
     if (existingId) {
-      const existing = findPerson(existingId);
+      let existing = findPerson(existingId);
+      if (!existing) existing = await fetchPersonById(existingId);
       if (!existing) {
         showError(el.addError, '请重新选择已经在谱里的那位亲人。');
         return;
       }
-      await bindPerson(existing, relation, anchor);
-      await loadTree();
-      openSheet(findPerson(existing.id) || existing);
+      // Explicit ID choice only — never inferred from name.
+      if (!isFirst) {
+        if (relation === 'father') ensureParentSlot(anchor, 'father_id', existing.id);
+        if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', existing.id);
+        await bindPerson(existing, relation, anchor);
+      } else {
+        state.rootId = String(existing.id);
+        localStorage.setItem(ROOT_KEY, state.rootId);
+      }
+      try {
+        await finishAddSuccess(existing);
+      } catch (loadErr) {
+        writeRecovery(buildRecoveryDraft({
+          target: existing,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: existing.name,
+          phase: 'display_load_failed',
+          message: DISPLAY_LOAD_FAIL_MSG,
+        }));
+        state.addIntent.pendingPersonId = existing.id;
+        state.mode = 'add';
+        el.formAdd.classList.remove('hidden');
+        showError(el.addError, DISPLAY_LOAD_FAIL_MSG);
+        showError(el.sheetError, DISPLAY_LOAD_FAIL_MSG);
+      }
       return;
     }
 
-    const payload = {
-      name: el.addName.value.trim(),
-      gender: isFirst ? 'unknown' : kin.gender,
-      generation: isFirst ? 1 : generationFor(relation, anchor),
-      birth_year: optionalInt(el.addBirthYear.value),
-      death_year: optionalInt(el.addDeathYear.value),
-    };
-    if (!payload.name) {
-      showError(el.addError, '请先写下这位亲人的名字。');
-      return;
-    }
-    const created = await api('/persons', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    try {
-      if (!isFirst) await bindPerson(created, relation, anchor);
-    } catch (bindErr) {
-      showError(el.addError, `人已经记下了，但亲疏关系没有保存：${bindErr.message}`);
-      if (!state.rootId) {
-        state.rootId = String(created.id);
-        localStorage.setItem(ROOT_KEY, state.rootId);
+    // Refuse conflicting parent slots BEFORE creating another person.
+    if (relation === 'father') ensureParentSlot(anchor, 'father_id', null);
+    if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', null);
+
+    let pendingId = state.addIntent.pendingPersonId || state.recovery?.pendingPersonId || null;
+    let phase = state.recovery?.phase || '';
+    const clientOpId = state.recovery?.clientOpId || newClientOpId();
+
+    let target = null;
+    if (pendingId) {
+      // Single GET-by-id failure does NOT clear recovery. Fall back to list;
+      // if loadPersons throws, error bubbles and durable recovery remains.
+      // Clear only when the list returns successfully and still lacks the id.
+      try {
+        target = await fetchPersonById(pendingId);
+      } catch (_) {
+        target = null;
       }
-      await loadTree();
-      openSheet(findPerson(created.id) || created);
+      if (!target) {
+        await loadPersons();
+        target = findPerson(pendingId);
+      }
+      if (!target) {
+        showError(el.addError, '刚才记下的亲人找不到了，请重新添加。');
+        clearRecovery();
+        return;
+      }
+      state.addIntent.pendingPersonId = target.id;
+    } else if (isCreateUnresolvedPhase(phase) && !confirmNew) {
+      // NO name-based adopt/merge. Require explicit existing ID or confirm-new.
+      try {
+        await loadPersons();
+      } catch (_) { /* still require explicit choice */ }
+      prepareUncertainPersonSelect(anchor);
+      const named = (state.recovery?.name || el.addName.value.trim() || '').trim();
+      writeRecovery(buildRecoveryDraft({
+        target: null,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: named,
+        phase: 'create_uncertain',
+        message: CREATE_UNCERTAIN_MSG,
+        clientOpId,
+      }));
+      state.mode = 'add';
+      el.formAdd.classList.remove('hidden');
+      showError(el.addError, CREATE_UNCERTAIN_MSG);
+      showError(el.sheetError, CREATE_UNCERTAIN_MSG);
+      return;
+    } else {
+      const payload = {
+        name: el.addName.value.trim(),
+        gender: isFirst ? 'unknown' : kin.gender,
+        generation: isFirst ? 1 : generationFor(relation, anchor),
+        birth_year: optionalInt(el.addBirthYear.value),
+        death_year: optionalInt(el.addDeathYear.value),
+      };
+      if (!payload.name) {
+        showError(el.addError, '请先写下这位亲人的名字。');
+        return;
+      }
+      // Ensure tree scope before durable inflight — empty list login cannot invent it.
+      try {
+        await ensureCurrentTreeId();
+      } catch (scopeErr) {
+        showError(el.addError, scopeErr.message || '还没拿到本谱编号，请重新登录后再试。');
+        return;
+      }
+      if (!state.treeId) {
+        showError(el.addError, '还没拿到本谱编号，请重新登录后再试。');
+        return;
+      }
+      // Durable inflight marker before POST so refresh mid-create cannot orphan identity intent.
+      writeRecovery(buildRecoveryDraft({
+        target: null,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: payload.name,
+        phase: 'create_inflight',
+        message: CREATE_UNCERTAIN_MSG,
+        clientOpId,
+      }));
+      try {
+        target = await api('/persons', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      } catch (createErr) {
+        if (isDefiniteClientRejection(createErr)) {
+          // Definite validation/auth rejection: not "maybe saved". Allow corrected resubmit.
+          clearRecovery();
+          state.addIntent.pendingPersonId = null;
+          state.mode = 'add';
+          el.formAdd.classList.remove('hidden');
+          showError(el.addError, createErr.message || '没有保存成功，请改一改再试。');
+          showError(el.sheetError, '');
+          return;
+        }
+        // Network / parse / unknown outcome — do not clear; no auto POST; no name adopt.
+        try {
+          await loadPersons();
+          await ensureCurrentTreeId();
+        } catch (_) { /* keep going to persist uncertain */ }
+        writeRecovery(buildRecoveryDraft({
+          target: null,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: payload.name,
+          phase: 'create_uncertain',
+          message: CREATE_UNCERTAIN_MSG,
+          clientOpId,
+        }));
+        prepareUncertainPersonSelect(anchor);
+        state.mode = 'add';
+        el.formAdd.classList.remove('hidden');
+        showError(el.addError, CREATE_UNCERTAIN_MSG);
+        showError(el.sheetError, CREATE_UNCERTAIN_MSG);
+        return;
+      }
+      state.addIntent.pendingPersonId = target.id;
+      writeRecovery(buildRecoveryDraft({
+        target,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: payload.name,
+        phase: 'created_unbound',
+        message: PARTIAL_SAVE_MSG,
+        clientOpId,
+      }));
+      phase = 'created_unbound';
+      pendingId = target.id;
+      try {
+        await loadPersons();
+      } catch (_) {
+        /* person exists; continue with returned payload */
+      }
+    }
+
+    // Saved person exists; display-load-only recovery skips bind (pending or failed).
+    if (phase === 'display_load_failed' || phase === 'display_load_pending') {
+      if (isFirst) {
+        state.rootId = String(target.id);
+        localStorage.setItem(ROOT_KEY, state.rootId);
+      } else {
+        ensureRootForPerson(target.id);
+      }
+      try {
+        await finishAddSuccess(target);
+      } catch (loadErr) {
+        writeRecovery(buildRecoveryDraft({
+          target,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: target.name,
+          phase: 'display_load_failed',
+          message: DISPLAY_LOAD_FAIL_MSG,
+        }));
+        state.addIntent.pendingPersonId = target.id;
+        state.mode = 'add';
+        el.formAdd.classList.remove('hidden');
+        showError(el.addError, DISPLAY_LOAD_FAIL_MSG);
+        showError(el.sheetError, DISPLAY_LOAD_FAIL_MSG);
+      }
       return;
     }
-    if (!state.rootId) {
-      state.rootId = String(created.id);
-      localStorage.setItem(ROOT_KEY, state.rootId);
+
+    try {
+      if (!isFirst) await bindPerson(target, relation, anchor);
+    } catch (bindErr) {
+      const detail = bindErr.message ? `：${bindErr.message}` : '';
+      const msg = `${PARTIAL_SAVE_MSG}${detail}`;
+      writeRecovery(buildRecoveryDraft({
+        target,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: target.name,
+        phase: 'bind_failed',
+        message: msg,
+      }));
+      showError(el.addError, msg);
+      showError(el.sheetError, msg);
+      if (isFirst || !state.rootId) ensureRootForPerson(target.id);
+      else ensureRootForPerson(state.rootId);
+      state.mode = 'add';
+      state.addIntent.pendingPersonId = target.id;
+      try {
+        await loadPersons();
+        syncRootWithPersons();
+        if (state.rootId) {
+          state.tree = await api(`/persons/${state.rootId}/tree`);
+          render();
+        }
+      } catch (_) { /* keep form + recovery */ }
+      el.formAdd.classList.remove('hidden');
+      return;
     }
-    await loadTree();
-    openSheet(findPerson(created.id) || created);
+
+    // Bind (or first-person create) succeeded — do not clear recovery until display load works.
+    writeRecovery(buildRecoveryDraft({
+      target,
+      kinKey,
+      relation,
+      anchor,
+      parentRole,
+      name: target.name,
+      phase: 'display_load_pending',
+      message: DISPLAY_LOAD_FAIL_MSG,
+    }));
+    state.addIntent.pendingPersonId = target.id;
+    if (isFirst) {
+      state.rootId = String(target.id);
+      localStorage.setItem(ROOT_KEY, state.rootId);
+    } else {
+      ensureRootForPerson(target.id);
+    }
+    try {
+      await loadPersons();
+      await finishAddSuccess(target);
+    } catch (loadErr) {
+      writeRecovery(buildRecoveryDraft({
+        target,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: target.name,
+        phase: 'display_load_failed',
+        message: DISPLAY_LOAD_FAIL_MSG,
+      }));
+      state.addIntent.pendingPersonId = target.id;
+      state.mode = 'add';
+      el.formAdd.classList.remove('hidden');
+      showError(el.addError, DISPLAY_LOAD_FAIL_MSG);
+      showError(el.sheetError, DISPLAY_LOAD_FAIL_MSG);
+    }
   } catch (err) {
     showError(el.addError, err.message);
+  } finally {
+    setSaving(false);
   }
 }
 
@@ -727,9 +1520,16 @@ el.kinGrid.addEventListener('click', (event) => {
   startAddForKin(button.dataset.kin);
 });
 el.addExisting?.addEventListener('change', () => {
-  const usingExisting = Boolean(el.addExisting.value);
+  const val = el.addExisting.value;
+  const usingExisting = Boolean(val) && val !== CONFIRM_NEW_VALUE;
   el.addName.required = !usingExisting;
-  if (usingExisting) el.addName.value = el.addExisting.selectedOptions[0]?.textContent.split('（')[0] || el.addName.value;
+  if (usingExisting) {
+    const label = el.addExisting.selectedOptions[0]?.textContent || '';
+    el.addName.value = label.split('（')[0].split('#')[0] || el.addName.value;
+  }
+});
+el.addParentRole?.addEventListener('change', () => {
+  state.addIntent.parentRole = el.addParentRole.value || '';
 });
 el.formAdd.addEventListener('submit', (event) => submitAdd(event));
 // The paper also changes size when the biography opens or closes.
@@ -739,7 +1539,9 @@ render();
 
 if (state.token) {
   setAuthed(true);
-  loadTree().catch(() => {
-    /* token may be stale */
-  });
+  loadTree()
+    .then(() => resumeRecoveryUi())
+    .catch(() => {
+      /* token may be stale */
+    });
 }
