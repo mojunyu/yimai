@@ -160,6 +160,35 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
 .section-hint { font-size: 11px; color: var(--muted); line-height: 1.8; margin: -5px 0 15px; }
 .relation-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .relation-actions button { font-size: 12px; padding: 8px 5px; }
+
+.kin-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+.kin-grid button {
+  height: 42px;
+  padding: 0;
+  font-family: var(--serif);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--ink);
+  background: #fbf8f1;
+  border: 1px solid var(--line);
+}
+.kin-grid button:hover,
+.kin-grid button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.kin-grid button[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fffaf0;
+}
+.add-form { margin-top: 18px; }
+
 .form-stack { display: flex; flex-direction: column; gap: 16px; }
 .form-stack label { display: flex; flex-direction: column; align-items: stretch; gap: 7px; font-size: 12px; line-height: 1.6; color: var(--muted); min-width: 0; }
 .form-stack input, .form-stack select { font-size: 13px; }

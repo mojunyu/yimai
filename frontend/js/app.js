@@ -28,6 +28,19 @@ const state = {
   addIntent: { relation: '', anchorId: null },
 };
 
+const KIN = {
+  father: { relation: 'father', gender: 'male', word: '父亲' },
+  mother: { relation: 'mother', gender: 'female', word: '母亲' },
+  elder_brother: { relation: 'sibling', gender: 'male', word: '哥哥' },
+  elder_sister: { relation: 'sibling', gender: 'female', word: '姐姐' },
+  younger_brother: { relation: 'sibling', gender: 'male', word: '弟弟' },
+  younger_sister: { relation: 'sibling', gender: 'female', word: '妹妹' },
+  son: { relation: 'child', gender: 'male', word: '儿子' },
+  daughter: { relation: 'child', gender: 'female', word: '女儿' },
+  husband: { relation: 'spouse', gender: 'male', word: '丈夫' },
+  wife: { relation: 'spouse', gender: 'female', word: '妻子' },
+};
+
 const el = {
   email: document.getElementById('email'),
   password: document.getElementById('password'),
@@ -42,35 +55,22 @@ const el = {
   sheetSummary: document.getElementById('sheet-summary'),
   sheetDetail: document.getElementById('sheet-detail'),
   formAdd: document.getElementById('form-add'),
-  formParents: document.getElementById('form-parents'),
-  formSpouse: document.getElementById('form-spouse'),
   closeSheet: document.getElementById('btn-close-sheet'),
   cancelAdd: document.getElementById('btn-cancel-add'),
   setRoot: document.getElementById('btn-set-root'),
-  addFather: document.getElementById('btn-add-father'),
-  addMother: document.getElementById('btn-add-mother'),
-  addSpouse: document.getElementById('btn-add-spouse'),
-  addChild: document.getElementById('btn-add-child'),
-  addSibling: document.getElementById('btn-add-sibling'),
+  kinGrid: document.getElementById('kin-grid'),
+  addHint: document.getElementById('add-hint'),
   addName: document.getElementById('add-name'),
-  addGender: document.getElementById('add-gender'),
   addBirthYear: document.getElementById('add-birth-year'),
   addDeathYear: document.getElementById('add-death-year'),
   addContext: document.getElementById('add-context'),
-  addRelationWrap: document.getElementById('add-relation-wrap'),
-  addAnchor: document.getElementById('add-anchor'),
-  addRelation: document.getElementById('add-relation'),
-  addParentRoleWrap: document.getElementById('add-parent-role-wrap'),
-  addParentRole: document.getElementById('add-parent-role'),
-  addSiblingRoleWrap: document.getElementById('add-sibling-role-wrap'),
-  addSiblingRole: document.getElementById('add-sibling-role'),
+  addExisting: document.getElementById('add-existing'),
+  addExistingWrap: document.getElementById('add-existing-wrap'),
   addError: document.getElementById('add-error'),
-  fatherId: document.getElementById('father-id'),
-  motherId: document.getElementById('mother-id'),
-  spouseId: document.getElementById('spouse-id'),
-  spouseStart: document.getElementById('spouse-start'),
-  spouseEnd: document.getElementById('spouse-end'),
   sheetError: document.getElementById('sheet-error'),
+  addSection: document.getElementById('add-section'),
+  perspectiveAction: document.querySelector('.perspective-action'),
+  perspectiveNote: document.querySelector('.perspective-note'),
 };
 
 function authHeaders() {
@@ -214,11 +214,6 @@ function fillPersonSelect(selectEl, { excludeId, emptyLabel, selectedId }) {
   selectEl.innerHTML = options.join('');
 }
 
-function spouseButtonLabel(person) {
-  if (person?.gender === 'male') return '添妻子';
-  if (person?.gender === 'female') return '添丈夫';
-  return '添配偶';
-}
 
 function generationFor(relation, anchor) {
   const current = Number(anchor?.generation) || 1;
@@ -228,18 +223,9 @@ function generationFor(relation, anchor) {
   return 1;
 }
 
-function defaultGenderFor(relation, anchor) {
-  if (relation === 'father') return 'male';
-  if (relation === 'mother') return 'female';
-  if (relation === 'spouse' && anchor?.gender === 'male') return 'female';
-  if (relation === 'spouse' && anchor?.gender === 'female') return 'male';
-  return 'unknown';
-}
-
 function childParentRole(anchor) {
   if (anchor?.gender === 'female') return 'mother';
-  if (anchor?.gender === 'male') return 'father';
-  return el.addParentRole.value || 'father';
+  return 'father';
 }
 
 function hasKnownParent(person) {
@@ -251,67 +237,120 @@ function missingParentsMessage(anchor) {
   return `要先给${name}记下父亲或母亲，才能把兄弟姐妹连在同一房里。`;
 }
 
-function updateParentRoleVisibility() {
-  const relation = state.addIntent.relation || el.addRelation.value;
-  const anchor = findPerson(state.addIntent.anchorId || el.addAnchor.value);
-  const needChoice = relation === 'child' && Boolean(anchor) && (anchor.gender === 'unknown' || !anchor.gender);
-  el.addParentRoleWrap.classList.toggle('hidden', !needChoice);
-  el.addSiblingRoleWrap.classList.toggle('hidden', relation !== 'sibling');
-}
-
-async function loadPersons() {
-  if (!state.token) {
-    state.persons = [];
-    return;
+function addContextText(kinKey, anchor) {
+  if (kinKey === 'first' || !anchor) {
+    return '家里还没有记下亲人。先写下第一位的名字就好。';
   }
-  const list = await api('/persons');
-  state.persons = list.data || [];
+  const kin = KIN[kinKey];
+  if (!kin) return `给「${anchor.name}」添一位亲人。`;
+  const name = `「${anchor.name}」`;
+  if (kin.relation === 'sibling') {
+    return `给${name}添一位${kin.word}。会记到和${name}同一位父亲或母亲名下。`;
+  }
+  return `给${name}添一位${kin.word}。`;
 }
 
-async function login() {
-  const body = {
-    email: el.email.value.trim(),
-    password: el.password.value,
-  };
-  const data = await fetch(`${API_BASE}/auth/login`, {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  }).then(async (res) => {
-    if (!res.ok) throw new Error('账号或密码不对，请再试一次。');
-    return res.json();
+function setKinPressed(kinKey) {
+  el.kinGrid.querySelectorAll('button[data-kin]').forEach((button) => {
+    button.setAttribute('aria-pressed', String(button.dataset.kin === kinKey));
   });
-
-  state.token = data.token;
-  localStorage.setItem(TOKEN_KEY, state.token);
-  setAuthed(true);
-
-  await loadPersons();
-  if (!state.rootId && state.persons[0]) {
-    state.rootId = String(state.persons[0].id);
-    localStorage.setItem(ROOT_KEY, state.rootId);
-  }
-
-  await loadTree();
 }
 
-async function loadTree() {
-  if (!state.token) return;
-  await loadPersons();
-  if (!state.rootId) {
-    state.tree = { root_id: null, nodes: [], edges: [] };
-    render();
+function resetAddForm() {
+  el.formAdd.reset();
+  el.addName.required = true;
+  showError(el.addError, '');
+  if (el.addExisting) el.addExisting.value = '';
+}
+
+function setFirstPersonChrome(on) {
+  el.sheetSummary.classList.toggle('hidden', on);
+  el.perspectiveAction?.classList.toggle('hidden', on);
+  el.perspectiveNote?.classList.toggle('hidden', on);
+  el.kinGrid.classList.toggle('hidden', on);
+  el.addHint.classList.toggle('hidden', on);
+}
+
+function fillExistingSelect(anchor) {
+  const others = state.persons.filter((person) => !anchor || !sameId(person.id, anchor.id));
+  if (!el.addExistingWrap) return;
+  if (!anchor || others.length === 0) {
+    el.addExistingWrap.classList.add('hidden');
+    if (el.addExisting) el.addExisting.innerHTML = '';
     return;
   }
+  el.addExistingWrap.classList.remove('hidden');
+  fillPersonSelect(el.addExisting, {
+    excludeId: anchor.id,
+    emptyLabel: '不是，这是一位新记下的亲人',
+    selectedId: '',
+  });
+}
 
-  state.tree = await api(`/persons/${state.rootId}/tree`);
-  state.rootId = String(state.tree.root_id);
-  localStorage.setItem(ROOT_KEY, state.rootId);
-  render();
-  if (state.selectedId && state.mode === 'detail') {
-    const person = findPerson(state.selectedId);
-    if (person) openSheet(person);
+function showAddFormForKin(kinKey, anchor) {
+  state.addIntent = { kin: kinKey, relation: KIN[kinKey].relation, anchorId: anchor.id };
+  setKinPressed(kinKey);
+  setFirstPersonChrome(false);
+  el.formAdd.classList.remove('hidden');
+  resetAddForm();
+  fillExistingSelect(anchor);
+  el.addContext.textContent = addContextText(kinKey, anchor);
+  el.addName.focus();
+}
+
+function showFirstPersonForm() {
+  state.mode = 'add';
+  state.selectedId = null;
+  state.addIntent = { kin: 'first', relation: '', anchorId: null };
+  setKinPressed('');
+  el.sheet.classList.remove('hidden');
+  el.sheetDetail.classList.remove('hidden');
+  el.formAdd.classList.remove('hidden');
+  el.sheetTitle.textContent = '第一位家人';
+  document.getElementById('sheet-kicker').textContent = '续写家谱';
+  d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
+  setFirstPersonChrome(true);
+  resetAddForm();
+  el.addExistingWrap.classList.add('hidden');
+  el.addContext.textContent = addContextText('first');
+  showError(el.sheetError, '');
+  el.sheet.scrollTop = 0;
+  el.addName.focus();
+}
+
+function startAddForKin(kinKey) {
+  const kin = KIN[kinKey];
+  const anchor = findPerson(state.selectedId);
+  if (!kin || !anchor) {
+    showError(el.sheetError, '请先在树上点一位当前人，再选择要添加的关系。');
+    return;
   }
+  if (kin.relation === 'sibling' && !hasKnownParent(anchor)) {
+    showError(el.sheetError, missingParentsMessage(anchor));
+    el.formAdd.classList.add('hidden');
+    setKinPressed('');
+    return;
+  }
+  showError(el.sheetError, '');
+  showAddFormForKin(kinKey, anchor);
+}
+
+function onToolbarAdd() {
+  if (!state.token) {
+    alert('请先登录，再给家里添人。');
+    return;
+  }
+  if (state.persons.length === 0) {
+    showFirstPersonForm();
+    return;
+  }
+  const anchor = findPerson(state.selectedId);
+  if (!anchor) {
+    alert('请先在树上点一位当前人，再选父、母、哥、姐、弟、妹、儿、女、夫、妻。');
+    return;
+  }
+  el.sheet.classList.remove('hidden');
+  el.addSection?.scrollIntoView({ block: 'nearest' });
 }
 
 function genderGlyph(gender) {
@@ -335,7 +374,7 @@ function render() {
 
   el.empty.classList.toggle('hidden', nodes.length > 0);
   document.getElementById('empty-hint').textContent = state.token
-    ? '家里还没有记下亲人。点右上角「添一位家人」，写下第一位就好。'
+    ? '家里还没有记下亲人。点右上角「添加」，写下第一位就好。'
     : '用上方预填的演示账号登录，翻开这本家谱。';
   setAuthed(Boolean(state.token));
 
@@ -483,70 +522,25 @@ function siblingsOf(personId) {
   return childIds.map((id) => findPerson(id)).filter(Boolean);
 }
 
-function addContextText(relation, anchor) {
-  if (!anchor) return '先把这位亲人的名字记下来。若已经知道和家里谁有关系，也可以一起选上。';
-  const name = `「${anchor.name}」`;
-  if (relation === 'father') return `给${name}添一位父亲。`;
-  if (relation === 'mother') return `给${name}添一位母亲。`;
-  if (relation === 'spouse' && anchor.gender === 'male') return `给${name}添一位妻子。`;
-  if (relation === 'spouse' && anchor.gender === 'female') return `给${name}添一位丈夫。`;
-  if (relation === 'spouse') return `给${name}添一位配偶。`;
-  if (relation === 'child') return `给${name}添一个孩子。`;
-  if (relation === 'sibling') return `给${name}添一位兄弟姐妹。会记到和${name}同一位父亲或母亲名下。`;
-  return `给${name}添一位亲人。`;
-}
-
-function showAddForm({ relation = '', anchor = null, chooseRelation = false } = {}) {
-  if (!state.token) {
-    alert('请先登录，再给家里添人。');
-    return;
-  }
-  state.mode = 'add';
-  state.selectedId = null;
-  state.addIntent = { relation, anchorId: anchor ? anchor.id : null };
-  el.sheet.classList.remove('hidden');
-  el.sheetDetail.classList.add('hidden');
-  el.formAdd.classList.remove('hidden');
-  el.sheetTitle.textContent = '添一位家人';
-  document.getElementById('sheet-kicker').textContent = '续写家谱';
-  d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
-  el.formAdd.reset();
-  el.addGender.value = defaultGenderFor(relation, anchor);
-  if (el.addSiblingRole) el.addSiblingRole.value = '';
-  el.addContext.textContent = addContextText(relation, anchor);
-  showError(el.addError, '');
-
-  if (chooseRelation) {
-    el.addRelationWrap.classList.remove('hidden');
-    fillPersonSelect(el.addAnchor, {
-      excludeId: null,
-      emptyLabel: '先不选，只把人记下',
-      selectedId: anchor?.id || '',
-    });
-    el.addRelation.value = relation;
-  } else {
-    el.addRelationWrap.classList.add('hidden');
-  }
-  updateParentRoleVisibility();
-  el.sheet.scrollTop = 0;
-  el.addName.focus();
-}
 
 function openSheet(node) {
   const personChanged = state.mode !== 'detail' || !sameId(state.selectedId, node.id);
   state.mode = 'detail';
   state.selectedId = node.id;
-  el.formAdd.classList.add('hidden');
+  state.addIntent = { relation: '', anchorId: node.id, kin: '' };
   el.sheetDetail.classList.remove('hidden');
   el.sheet.classList.remove('hidden');
+  el.formAdd.classList.add('hidden');
+  setFirstPersonChrome(false);
+  setKinPressed('');
   el.sheetTitle.textContent = node.name;
   document.getElementById('sheet-kicker').textContent = '家人小传';
   d3.select(el.canvas).selectAll('.node-card')
     .classed('selected', (d) => sameId(d.id, node.id))
     .attr('aria-pressed', (d) => String(sameId(d.id, node.id)));
   el.setRoot.textContent = `从「${node.name}」看这棵家谱`;
-  el.addSpouse.textContent = spouseButtonLabel(node);
   showError(el.sheetError, '');
+  showError(el.addError, '');
 
   const rel = relationsFromEdges(node.id);
   const gender = genderWord(node.gender);
@@ -560,38 +554,36 @@ function openSheet(node) {
   const childLine = rel.children.length ? `子女有${namesOf(rel.children)}。` : '子女还没有记下。';
   el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>`;
   el.setRoot.dataset.personId = String(node.id);
-
-  const record = findPerson(node.id) || {};
-  fillPersonSelect(el.fatherId, {
-    excludeId: node.id,
-    emptyLabel: '先不选',
-    selectedId: record.father_id,
-  });
-  fillPersonSelect(el.motherId, {
-    excludeId: node.id,
-    emptyLabel: '先不选',
-    selectedId: record.mother_id,
-  });
-  fillPersonSelect(el.spouseId, {
-    excludeId: node.id,
-    emptyLabel: '请选择家里的人',
-    selectedId: '',
-  });
-  el.spouseStart.value = '';
-  el.spouseEnd.value = '';
   if (personChanged) el.sheet.scrollTop = 0;
 }
 
 function closeSheet() {
+  const wasFirst = state.addIntent.kin === 'first';
   state.selectedId = null;
   state.mode = 'detail';
-  state.addIntent = { relation: '', anchorId: null };
-  el.sheet.classList.add('hidden');
-  d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
+  state.addIntent = { relation: '', anchorId: null, kin: '' };
   el.formAdd.classList.add('hidden');
-  el.sheetDetail.classList.remove('hidden');
+  setKinPressed('');
+  setFirstPersonChrome(false);
   showError(el.addError, '');
   showError(el.sheetError, '');
+  if (wasFirst || !findPerson(state.selectedId)) {
+    el.sheet.classList.add('hidden');
+  }
+  d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
+}
+
+function cancelAdd() {
+  if (state.addIntent.kin === 'first' && state.persons.length === 0) {
+    closeSheet();
+    return;
+  }
+  const anchor = findPerson(state.selectedId) || findPerson(state.addIntent.anchorId);
+  el.formAdd.classList.add('hidden');
+  setKinPressed('');
+  state.addIntent = { relation: '', anchorId: anchor ? anchor.id : null, kin: '' };
+  showError(el.addError, '');
+  if (anchor) openSheet(anchor);
 }
 
 async function setAsRoot() {
@@ -602,26 +594,19 @@ async function setAsRoot() {
   await loadTree();
 }
 
-function currentAddIntent() {
-  if (el.addRelationWrap.classList.contains('hidden')) {
-    return { relation: state.addIntent.relation, anchor: findPerson(state.addIntent.anchorId) };
-  }
-  return { relation: el.addRelation.value, anchor: findPerson(el.addAnchor.value) };
-}
-
-async function bindNewPerson(created, relation, anchor) {
-  if (!relation || !anchor) return;
+async function bindPerson(target, relation, anchor) {
+  if (!relation || !anchor || !target) return;
   if (relation === 'father') {
     await api(`/persons/${anchor.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ father_id: created.id }),
+      body: JSON.stringify({ father_id: target.id }),
     });
     return;
   }
   if (relation === 'mother') {
     await api(`/persons/${anchor.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ mother_id: created.id }),
+      body: JSON.stringify({ mother_id: target.id }),
     });
     return;
   }
@@ -630,17 +615,16 @@ async function bindNewPerson(created, relation, anchor) {
       method: 'POST',
       body: JSON.stringify({
         person_a_id: Number(anchor.id),
-        person_b_id: Number(created.id),
+        person_b_id: Number(target.id),
       }),
     });
     return;
   }
   if (relation === 'child') {
-    const role = childParentRole(anchor);
-    const payload = role === 'mother'
+    const payload = childParentRole(anchor) === 'mother'
       ? { mother_id: Number(anchor.id) }
       : { father_id: Number(anchor.id) };
-    await api(`/persons/${created.id}`, {
+    await api(`/persons/${target.id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     });
@@ -653,7 +637,7 @@ async function bindNewPerson(created, relation, anchor) {
     const payload = {};
     if (anchor.father_id != null) payload.father_id = Number(anchor.father_id);
     if (anchor.mother_id != null) payload.mother_id = Number(anchor.mother_id);
-    await api(`/persons/${created.id}`, {
+    await api(`/persons/${target.id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     });
@@ -663,29 +647,53 @@ async function bindNewPerson(created, relation, anchor) {
 async function submitAdd(event) {
   event.preventDefault();
   showError(el.addError, '');
-  const { relation, anchor } = currentAddIntent();
-  const payload = {
-    name: el.addName.value.trim(),
-    gender: el.addGender.value,
-    generation: generationFor(relation, anchor),
-    birth_year: optionalInt(el.addBirthYear.value),
-    death_year: optionalInt(el.addDeathYear.value),
-  };
-  if (!payload.name) {
-    showError(el.addError, '请先写下这位亲人的名字。');
+  const kinKey = state.addIntent.kin;
+  const isFirst = kinKey === 'first';
+  const kin = isFirst ? null : KIN[kinKey];
+  const relation = isFirst ? '' : (kin?.relation || state.addIntent.relation);
+  const anchor = isFirst ? null : findPerson(state.addIntent.anchorId || state.selectedId);
+  if (!isFirst && (!kin || !anchor)) {
+    showError(el.addError, '请先在树上点一位当前人，再选择要添加的关系。');
     return;
   }
   if (relation === 'sibling' && !hasKnownParent(anchor)) {
     showError(el.addError, missingParentsMessage(anchor));
     return;
   }
+
+  const existingId = el.addExisting && !el.addExistingWrap.classList.contains('hidden')
+    ? el.addExisting.value
+    : '';
   try {
+    if (existingId) {
+      const existing = findPerson(existingId);
+      if (!existing) {
+        showError(el.addError, '请重新选择已经在谱里的那位亲人。');
+        return;
+      }
+      await bindPerson(existing, relation, anchor);
+      await loadTree();
+      openSheet(findPerson(existing.id) || existing);
+      return;
+    }
+
+    const payload = {
+      name: el.addName.value.trim(),
+      gender: isFirst ? 'unknown' : kin.gender,
+      generation: isFirst ? 1 : generationFor(relation, anchor),
+      birth_year: optionalInt(el.addBirthYear.value),
+      death_year: optionalInt(el.addDeathYear.value),
+    };
+    if (!payload.name) {
+      showError(el.addError, '请先写下这位亲人的名字。');
+      return;
+    }
     const created = await api('/persons', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
     try {
-      await bindNewPerson(created, relation, anchor);
+      if (!isFirst) await bindPerson(created, relation, anchor);
     } catch (bindErr) {
       showError(el.addError, `人已经记下了，但亲疏关系没有保存：${bindErr.message}`);
       if (!state.rootId) {
@@ -707,90 +715,23 @@ async function submitAdd(event) {
   }
 }
 
-async function submitParents(event) {
-  event.preventDefault();
-  showError(el.sheetError, '');
-  const id = state.selectedId;
-  if (!id) return;
-  const payload = {
-    father_id: optionalInt(el.fatherId.value),
-    mother_id: optionalInt(el.motherId.value),
-  };
-  try {
-    await api(`/persons/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    });
-    await loadTree();
-  } catch (err) {
-    showError(el.sheetError, err.message);
-  }
-}
-
-async function submitSpouse(event) {
-  event.preventDefault();
-  showError(el.sheetError, '');
-  const id = state.selectedId;
-  const spouseId = optionalInt(el.spouseId.value);
-  if (!id) return;
-  if (!spouseId) {
-    showError(el.sheetError, '请先选择要结为夫妻的那位家人。');
-    return;
-  }
-  const payload = {
-    person_a_id: Number(id),
-    person_b_id: spouseId,
-    start_year: optionalInt(el.spouseStart.value),
-    end_year: optionalInt(el.spouseEnd.value),
-  };
-  try {
-    await api('/spouse-links', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    await loadTree();
-  } catch (err) {
-    showError(el.sheetError, err.message);
-  }
-}
-
-function startAddFor(relation) {
-  const anchor = findPerson(state.selectedId);
-  if (!anchor) return;
-  if (relation === 'sibling' && !hasKnownParent(anchor)) {
-    showError(el.sheetError, missingParentsMessage(anchor));
-    return;
-  }
-  showAddForm({ relation, anchor, chooseRelation: false });
-}
-
 el.login.addEventListener('click', () => login().catch((e) => alert(e.message)));
 el.reload.addEventListener('click', () => loadTree().catch((e) => alert(e.message)));
-el.add.addEventListener('click', () => showAddForm({ chooseRelation: true }));
-el.cancelAdd.addEventListener('click', closeSheet);
+el.add.addEventListener('click', onToolbarAdd);
+el.cancelAdd.addEventListener('click', cancelAdd);
 el.closeSheet.addEventListener('click', closeSheet);
 el.setRoot.addEventListener('click', () => setAsRoot().catch((e) => alert(e.message)));
-el.addFather.addEventListener('click', () => startAddFor('father'));
-el.addMother.addEventListener('click', () => startAddFor('mother'));
-el.addSpouse.addEventListener('click', () => startAddFor('spouse'));
-el.addChild.addEventListener('click', () => startAddFor('child'));
-el.addSibling.addEventListener('click', () => startAddFor('sibling'));
-el.addSiblingRole.addEventListener('change', () => {
-  if (el.addSiblingRole.value) el.addGender.value = el.addSiblingRole.value;
+el.kinGrid.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-kin]');
+  if (!button) return;
+  startAddForKin(button.dataset.kin);
 });
-el.addAnchor.addEventListener('change', updateParentRoleVisibility);
-el.addRelation.addEventListener('change', () => {
-  const anchor = findPerson(el.addAnchor.value);
-  const relation = el.addRelation.value;
-  state.addIntent = { relation, anchorId: anchor ? anchor.id : null };
-  el.addContext.textContent = addContextText(relation, anchor);
-  if (relation) el.addGender.value = defaultGenderFor(relation, anchor);
-  if (el.addSiblingRole) el.addSiblingRole.value = '';
-  updateParentRoleVisibility();
+el.addExisting?.addEventListener('change', () => {
+  const usingExisting = Boolean(el.addExisting.value);
+  el.addName.required = !usingExisting;
+  if (usingExisting) el.addName.value = el.addExisting.selectedOptions[0]?.textContent.split('（')[0] || el.addName.value;
 });
 el.formAdd.addEventListener('submit', (event) => submitAdd(event));
-el.formParents.addEventListener('submit', (event) => submitParents(event));
-el.formSpouse.addEventListener('submit', (event) => submitSpouse(event));
 // The paper also changes size when the biography opens or closes.
 new ResizeObserver(() => render()).observe(el.canvas.parentElement);
 

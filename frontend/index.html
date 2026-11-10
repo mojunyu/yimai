@@ -39,7 +39,7 @@
         <div class="stats" id="stats" role="status">登录后，就可以看见家里的人</div>
         <div class="toolbar-actions">
           <button type="button" id="btn-reload" class="ghost" disabled><span aria-hidden="true">↻</span> 重新载入</button>
-          <button type="button" id="btn-add" disabled><span aria-hidden="true">＋</span> 添一位家人</button>
+          <button type="button" id="btn-add" disabled><span aria-hidden="true">＋</span> 添加</button>
         </div>
       </div>
     </div>
@@ -82,55 +82,6 @@
           <button type="button" id="btn-close-sheet" class="ghost close-sheet">收起 <span aria-hidden="true">×</span></button>
         </div>
 
-        <form id="form-add" class="form-stack hidden">
-          <p id="add-context" class="form-lead"></p>
-          <label>这位亲人叫什么<input id="add-name" type="text" maxlength="64" required placeholder="例如：张素芬" /></label>
-          <label>性别
-            <select id="add-gender">
-              <option value="unknown">先不填</option>
-              <option value="male">男</option>
-              <option value="female">女</option>
-            </select>
-          </label>
-          <div class="form-pair">
-            <label>哪一年出生的<input id="add-birth-year" type="number" min="1" max="9999" placeholder="记不清就空着" /></label>
-            <label>若已去世，是哪一年<input id="add-death-year" type="number" min="1" max="9999" placeholder="还在世就空着" /></label>
-          </div>
-          <div id="add-relation-wrap" class="form-stack relation-fields hidden">
-            <label>和家里谁有关系
-              <select id="add-anchor"></select>
-            </label>
-            <label>这份关系是
-              <select id="add-relation">
-                <option value="">先不关联，只先把人记下</option>
-                <option value="father">是TA的父亲</option>
-                <option value="mother">是TA的母亲</option>
-                <option value="spouse">是TA的配偶</option>
-                <option value="child">是TA的孩子</option>
-                <option value="sibling">是TA的兄弟姐妹</option>
-              </select>
-            </label>
-          </div>
-          <label id="add-sibling-role-wrap" class="hidden">是TA的
-            <select id="add-sibling-role">
-              <option value="">兄弟姐妹（性别先不填）</option>
-              <option value="male">哥哥或弟弟</option>
-              <option value="female">姐姐或妹妹</option>
-            </select>
-          </label>
-          <label id="add-parent-role-wrap" class="hidden">孩子这边，把目前这位记为
-            <select id="add-parent-role">
-              <option value="father">父亲</option>
-              <option value="mother">母亲</option>
-            </select>
-          </label>
-          <p id="add-error" class="form-error hidden" role="alert"></p>
-          <div class="sheet-actions add-actions">
-            <button type="submit">记下这位亲人</button>
-            <button type="button" id="btn-cancel-add" class="ghost">先不添了</button>
-          </div>
-        </form>
-
         <div id="sheet-detail">
           <div id="sheet-summary" class="sheet-summary"></div>
           <div class="sheet-actions perspective-action">
@@ -138,48 +89,42 @@
           </div>
           <p class="perspective-note">从这位亲人出发，重新展开家谱。</p>
 
-          <section class="sheet-section">
-            <h3 class="form-heading">为TA添一位亲人</h3>
-            <p class="section-hint">把还未记下的家人，续在这一脉里。</p>
-            <div class="relation-actions">
-              <button type="button" id="btn-add-father" class="ghost">添父亲</button>
-              <button type="button" id="btn-add-mother" class="ghost">添母亲</button>
-              <button type="button" id="btn-add-spouse" class="ghost">添配偶</button>
-              <button type="button" id="btn-add-child" class="ghost">添孩子</button>
-              <button type="button" id="btn-add-sibling" class="ghost">添兄弟姐妹</button>
+          <section class="sheet-section" id="add-section">
+            <h3 class="form-heading">添加</h3>
+            <p class="section-hint" id="add-hint">选中当前人后，点一种关系，写下名字即可。</p>
+            <div class="kin-grid" id="kin-grid" role="group" aria-label="添加亲人">
+              <button type="button" data-kin="father">父</button>
+              <button type="button" data-kin="mother">母</button>
+              <button type="button" data-kin="elder_brother">哥</button>
+              <button type="button" data-kin="elder_sister">姐</button>
+              <button type="button" data-kin="younger_brother">弟</button>
+              <button type="button" data-kin="younger_sister">妹</button>
+              <button type="button" data-kin="son">儿</button>
+              <button type="button" data-kin="daughter">女</button>
+              <button type="button" data-kin="husband">夫</button>
+              <button type="button" data-kin="wife">妻</button>
             </div>
-          </section>
 
-          <section class="sheet-section">
-            <h3 class="form-heading">在现有家人里认亲</h3>
-            <p class="section-hint">亲人已经在谱里，选中名字就能认亲。</p>
-            <form id="form-parents" class="form-stack">
+            <form id="form-add" class="form-stack add-form hidden">
+              <p id="add-context" class="form-lead"></p>
+              <label>叫什么<input id="add-name" type="text" maxlength="64" required placeholder="例如：张素芬" /></label>
               <div class="form-pair">
-                <label>父亲是<select id="father-id"></select></label>
-                <label>母亲是<select id="mother-id"></select></label>
+                <label>哪一年出生的<input id="add-birth-year" type="number" min="1" max="9999" placeholder="记不清就空着" /></label>
+                <label>若已去世，是哪一年<input id="add-death-year" type="number" min="1" max="9999" placeholder="还在世就空着" /></label>
               </div>
-              <div class="sheet-actions">
-                <button type="submit" class="secondary">认下这门亲</button>
-              </div>
-            </form>
-          </section>
-
-          <section class="sheet-section">
-            <h3 class="form-heading">记一段夫妻缘分</h3>
-            <form id="form-spouse" class="form-stack">
-              <label>与谁结为夫妻<select id="spouse-id"></select></label>
-              <div class="form-pair">
-                <label>哪一年成亲的<input id="spouse-start" type="number" min="1" max="9999" placeholder="记不清就空着" /></label>
-                <label>若已分开或结束，是哪一年<input id="spouse-end" type="number" min="1" max="9999" placeholder="还在一起就空着" /></label>
-              </div>
-              <div class="sheet-actions">
-                <button type="submit" class="secondary">记下这门亲事</button>
+              <label id="add-existing-wrap">或者，这位已经在谱里
+                <select id="add-existing"></select>
+              </label>
+              <p id="add-error" class="form-error hidden" role="alert"></p>
+              <div class="sheet-actions add-actions">
+                <button type="submit">记下</button>
+                <button type="button" id="btn-cancel-add" class="ghost">先不添了</button>
               </div>
             </form>
           </section>
 
           <p id="sheet-error" class="form-error hidden" role="alert"></p>
-          <p class="sheet-note">点树上的人，只会在这边打开介绍，不会换视角。想从某个人出发看整棵家谱，请点「从TA看这棵家谱」。</p>
+          <p class="sheet-note">点树上的人，打开这位的介绍。添加时请先选中当前人，再选父、母、哥、姐、弟、妹、儿、女、夫、妻。</p>
         </div>
       </aside>
     </div>
