@@ -125,3 +125,25 @@ button.ghost {
   padding: 6px 10px;
   border-radius: 4px;
 }
+
+.form-heading { margin: 8px 0 0; font-size: 13px; font-weight: 600; }
+.form-stack { display: flex; flex-direction: column; gap: 8px; }
+.form-stack label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.form-stack input,
+.form-stack select {
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 8px;
+  font: inherit;
+  color: var(--ink);
+  background: #fff;
+}
+.form-error { margin: 0; font-size: 13px; color: #9b2c2c; line-height: 1.4; }
+.sheet { overflow: auto; }

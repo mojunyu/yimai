@@ -16,6 +16,7 @@
       <input id="password" type="password" placeholder="password" value="password" />
       <button type="button" id="btn-login">登录</button>
       <button type="button" id="btn-reload" disabled>刷新树</button>
+      <button type="button" id="btn-add" disabled>添加成员</button>
     </div>
   </header>
 
@@ -23,7 +24,7 @@
     <section class="canvas-wrap">
       <div id="empty" class="empty hidden">
         <p>还没有家族成员</p>
-        <p class="hint">登录后加载演示树，或通过 API 添加第一位成员。</p>
+        <p class="hint">登录后点击右上角「添加成员」，或先加载演示树。</p>
       </div>
       <svg id="tree-canvas" aria-label="家族树画布"></svg>
     </section>
@@ -33,11 +34,54 @@
         <h2 id="sheet-title">成员</h2>
         <button type="button" id="btn-close-sheet" class="ghost">关闭</button>
       </div>
-      <dl id="sheet-body" class="sheet-body"></dl>
-      <div class="sheet-actions">
-        <button type="button" id="btn-set-root">设为根</button>
+
+      <form id="form-add" class="form-stack hidden">
+        <label>姓名<input id="add-name" type="text" maxlength="64" required /></label>
+        <label>性别
+          <select id="add-gender">
+            <option value="unknown">未知</option>
+            <option value="male">男</option>
+            <option value="female">女</option>
+          </select>
+        </label>
+        <label>世代<input id="add-generation" type="number" min="1" value="1" /></label>
+        <label>生年<input id="add-birth-year" type="number" min="1" max="9999" /></label>
+        <label>卒年<input id="add-death-year" type="number" min="1" max="9999" placeholder="空白表示在世" /></label>
+        <div class="sheet-actions">
+          <button type="submit">保存</button>
+          <button type="button" id="btn-cancel-add" class="ghost">取消</button>
+        </div>
+        <p id="add-error" class="form-error hidden"></p>
+      </form>
+
+      <div id="sheet-detail">
+        <dl id="sheet-body" class="sheet-body"></dl>
+        <div class="sheet-actions">
+          <button type="button" id="btn-set-root">设为根</button>
+        </div>
+
+        <h3 class="form-heading">绑定父母</h3>
+        <form id="form-parents" class="form-stack">
+          <label>父亲<select id="father-id"></select></label>
+          <label>母亲<select id="mother-id"></select></label>
+          <div class="sheet-actions">
+            <button type="submit">保存父母</button>
+          </div>
+        </form>
+
+        <h3 class="form-heading">绑定配偶</h3>
+        <form id="form-spouse" class="form-stack">
+          <label>配偶<select id="spouse-id"></select></label>
+          <label>开始年<input id="spouse-start" type="number" min="1" max="9999" /></label>
+          <label>结束年<input id="spouse-end" type="number" min="1" max="9999" placeholder="空白表示仍在续" /></label>
+          <div class="sheet-actions">
+            <button type="submit">绑定配偶</button>
+          </div>
+        </form>
+
+        <p id="sheet-error" class="form-error hidden"></p>
+        <p class="sheet-note">单击节点只打开本面板，不会换根。换根请点「设为根」。环检测等校验失败时会直接提示，不会写进树里。</p>
       </div>
-      <p class="sheet-note">单击节点只打开本面板，不会换根。换根请点「设为根」。</p>
     </aside>
   </main>
 
