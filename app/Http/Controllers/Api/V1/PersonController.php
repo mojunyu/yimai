@@ -109,11 +109,24 @@ class PersonController extends Controller
                 $nextMother !== null ? (int) $nextMother : null,
             );
 
-            if (array_key_exists('father_id', $parentData)) {
-                $data['father_id'] = $parentData['father_id'];
-            }
-            if (array_key_exists('mother_id', $parentData)) {
-                $data['mother_id'] = $parentData['mother_id'];
+            // Refuse silent overwrite of an already-set parent slot.
+            // null clears (unbind / AC-5); same id is idempotent; different non-null is 422.
+            foreach (['father_id', 'mother_id'] as $slot) {
+                if (! array_key_exists($slot, $parentData)) {
+                    continue;
+                }
+                $incoming = $parentData[$slot];
+                $current = $person->{$slot};
+                if (
+                    $current !== null
+                    && $incoming !== null
+                    && (int) $incoming !== (int) $current
+                ) {
+                    throw ValidationException::withMessages([
+                        $slot => ['Parent slot already set; refusing silent overwrite.'],
+                    ]);
+                }
+                $data[$slot] = $incoming;
             }
         }
 

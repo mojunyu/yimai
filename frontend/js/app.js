@@ -16,20 +16,29 @@ const ERROR_ZH = {
   'An open spouse link already exists for this pair.': '这两位已经记过还在续的夫妻关系了。',
   'death_year must be greater than or equal to birth_year.': '去世的年份不能早于出生的年份。',
   'end_year must be greater than or equal to start_year.': '结束的年份不能早于成亲的年份。',
+  'Parent slot already set; refusing silent overwrite.': '这位已经记过这位父母了，不能悄悄改成别人。',
 };
+
+const USER_KEY = 'yimai_user_id';
+const TREE_KEY = 'yimai_tree_id';
+const RECOVERY_KEY = 'yimai_add_recovery';
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
+  userId: localStorage.getItem(USER_KEY) || '',
+  treeId: localStorage.getItem(TREE_KEY) || '',
   rootId: localStorage.getItem(ROOT_KEY) || '',
   tree: null,
   persons: [],
   selectedId: null,
   mode: 'detail',
   saving: false,
+  recovery: null,
   addIntent: { relation: '', anchorId: null, kin: '', pendingPersonId: null, parentRole: '' },
 };
 
 const PARTIAL_SAVE_MSG = '人已记下，关系未保存';
+const DISPLAY_LOAD_FAIL_MSG = '人已记下且关系已保存，但画面没有刷新成功。请再点记下或重新载入，不会重复添加。';
 
 const KIN = {
   father: { relation: 'father', gender: 'male', word: '父亲' },
@@ -230,6 +239,79 @@ function generationFor(relation, anchor) {
   return 1;
 }
 
+function emptyIntent(extra = {}) {
+  return {
+    relation: '',
+    anchorId: null,
+    kin: '',
+    pendingPersonId: null,
+    parentRole: '',
+    ...extra,
+  };
+}
+
+function readRecoveryRaw() {
+  try {
+    const raw = localStorage.getItem(RECOVERY_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function recoveryScopedOk(rec) {
+  if (!rec || !state.userId) return false;
+  if (!sameId(rec.userId, state.userId)) return false;
+  if (rec.treeId && state.treeId && !sameId(rec.treeId, state.treeId)) return false;
+  return true;
+}
+
+function writeRecovery(rec) {
+  if (!rec) {
+    localStorage.removeItem(RECOVERY_KEY);
+    state.recovery = null;
+    return;
+  }
+  const payload = {
+    ...rec,
+    userId: String(state.userId || rec.userId || ''),
+    treeId: String(state.treeId || rec.treeId || ''),
+  };
+  localStorage.setItem(RECOVERY_KEY, JSON.stringify(payload));
+  state.recovery = payload;
+}
+
+function clearRecovery() {
+  writeRecovery(null);
+  state.addIntent.pendingPersonId = null;
+}
+
+function recoveryMessage(rec = state.recovery) {
+  if (!rec) return '';
+  if (rec.phase === 'display_load_failed') {
+    return rec.message || DISPLAY_LOAD_FAIL_MSG;
+  }
+  return rec.message || PARTIAL_SAVE_MSG;
+}
+
+function showRecoveryGuidance() {
+  const rec = state.recovery;
+  if (!rec || !recoveryScopedOk(rec)) return;
+  const msg = recoveryMessage(rec);
+  showError(el.sheetError, msg);
+  if (el.formAdd && !el.formAdd.classList.contains('hidden')) {
+    showError(el.addError, msg);
+  }
+}
+
+function syncTreeIdFromPersons() {
+  const fromPerson = state.persons.find((p) => p.tree_id != null);
+  if (fromPerson?.tree_id != null) {
+    state.treeId = String(fromPerson.tree_id);
+    localStorage.setItem(TREE_KEY, state.treeId);
+  }
+}
+
 async function loadPersons() {
   if (!state.token) {
     state.persons = [];
@@ -237,6 +319,11 @@ async function loadPersons() {
   }
   const list = await api('/persons');
   state.persons = list.data || [];
+  syncTreeIdFromPersons();
+}
+
+async function fetchPersonById(id) {
+  return api(`/persons/${id}`);
 }
 
 function syncRootWithPersons() {
@@ -249,6 +336,38 @@ function syncRootWithPersons() {
   if (!rootOk) {
     state.rootId = String(state.persons[0].id);
     localStorage.setItem(ROOT_KEY, state.rootId);
+  }
+}
+
+function loadScopedRecovery() {
+  const rec = readRecoveryRaw();
+  if (rec && recoveryScopedOk(rec)) {
+    state.recovery = rec;
+    return rec;
+  }
+  // Drop cross-account leakage.
+  if (rec && !recoveryScopedOk(rec)) {
+    localStorage.removeItem(RECOVERY_KEY);
+  }
+  state.recovery = null;
+  return null;
+}
+
+async function resumeRecoveryUi() {
+  const rec = loadScopedRecovery();
+  if (!rec) return;
+  showRecoveryGuidance();
+  if (rec.kin === 'first') {
+    const pending = findPerson(rec.pendingPersonId);
+    if (pending) {
+      // First person already exists — guide reload rather than create again.
+      showError(el.sheetError, recoveryMessage(rec));
+    }
+    return;
+  }
+  const anchor = findPerson(rec.anchorId);
+  if (anchor && KIN[rec.kin]) {
+    showAddFormForKin(rec.kin, anchor, { resume: true });
   }
 }
 
@@ -268,11 +387,14 @@ async function login() {
 
   state.token = data.token;
   localStorage.setItem(TOKEN_KEY, state.token);
+  state.userId = data.user?.id != null ? String(data.user.id) : '';
+  if (state.userId) localStorage.setItem(USER_KEY, state.userId);
   setAuthed(true);
 
   await loadPersons();
   syncRootWithPersons();
   await loadTree();
+  await resumeRecoveryUi();
 }
 
 async function loadTree() {
@@ -288,6 +410,10 @@ async function loadTree() {
   try {
     state.tree = await api(`/persons/${state.rootId}/tree`);
   } catch (err) {
+    // Recover only when root is stale/foreign (not in current persons).
+    // Transient failures on a known root must surface to callers (e.g. post-save display).
+    const rootKnown = state.persons.some((p) => sameId(p.id, state.rootId));
+    if (rootKnown) throw err;
     state.rootId = '';
     localStorage.removeItem(ROOT_KEY);
     syncRootWithPersons();
@@ -372,14 +498,22 @@ function setKinPressed(kinKey) {
   });
 }
 
-function resetAddForm() {
+function resetAddForm({ preservePending = false } = {}) {
+  const pendingId = state.addIntent.pendingPersonId;
+  const parentRole = state.addIntent.parentRole;
   el.formAdd.reset();
   el.addName.required = true;
-  showError(el.addError, '');
+  if (!preservePending) showError(el.addError, '');
   if (el.addExisting) el.addExisting.value = '';
   if (el.addParentRole) el.addParentRole.value = '';
-  state.addIntent.pendingPersonId = null;
-  state.addIntent.parentRole = '';
+  if (preservePending) {
+    state.addIntent.pendingPersonId = pendingId;
+    state.addIntent.parentRole = parentRole;
+    if (el.addParentRole && parentRole) el.addParentRole.value = parentRole;
+  } else {
+    state.addIntent.pendingPersonId = null;
+    state.addIntent.parentRole = '';
+  }
 }
 
 function setFirstPersonChrome(on) {
@@ -406,33 +540,68 @@ function fillExistingSelect(anchor) {
   });
 }
 
-function showAddFormForKin(kinKey, anchor) {
+function showAddFormForKin(kinKey, anchor, { resume = false } = {}) {
+  const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
+  const canResume = Boolean(
+    rec
+    && rec.pendingPersonId
+    && (resume
+      || (rec.kin === kinKey && sameId(rec.anchorId, anchor.id))),
+  );
+
   state.mode = 'add';
-  state.addIntent = {
+  state.selectedId = anchor.id;
+  state.addIntent = emptyIntent({
     kin: kinKey,
     relation: KIN[kinKey].relation,
     anchorId: anchor.id,
-    pendingPersonId: null,
-    parentRole: '',
-  };
+    pendingPersonId: canResume ? rec.pendingPersonId : null,
+    parentRole: canResume ? (rec.parentRole || '') : '',
+  });
   setKinPressed(kinKey);
   setFirstPersonChrome(false);
   updateAnchorLabel(anchor);
   el.formAdd.classList.remove('hidden');
-  resetAddForm();
+  resetAddForm({ preservePending: canResume });
   state.addIntent.kin = kinKey;
   state.addIntent.relation = KIN[kinKey].relation;
   state.addIntent.anchorId = anchor.id;
+  if (canResume) {
+    state.addIntent.pendingPersonId = rec.pendingPersonId;
+    state.addIntent.parentRole = rec.parentRole || '';
+  }
   fillExistingSelect(anchor);
+  if (canResume && el.addExisting && rec.pendingPersonId) {
+    el.addExisting.value = String(rec.pendingPersonId);
+    el.addName.required = false;
+    el.addName.value = rec.name || el.addName.value;
+  }
   updateParentRoleVisibility(KIN[kinKey].relation, anchor);
+  if (canResume && el.addParentRole && rec.parentRole) {
+    el.addParentRole.value = rec.parentRole;
+  }
   el.addContext.textContent = addContextText(kinKey, anchor);
+  if (canResume) {
+    showError(el.addError, recoveryMessage(rec));
+    showError(el.sheetError, recoveryMessage(rec));
+  } else if (rec && recoveryScopedOk(rec)) {
+    showError(
+      el.sheetError,
+      `${recoveryMessage(rec)}（未完成：${rec.name || '已记下的亲人'}。可回到原关系继续，或在下方选择那位已记下的亲人。）`,
+    );
+  }
   el.addName.focus();
 }
 
 function showFirstPersonForm() {
+  const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
+  const canResume = Boolean(rec && rec.kin === 'first' && rec.pendingPersonId);
   state.mode = 'add';
   state.selectedId = null;
-  state.addIntent = { kin: 'first', relation: '', anchorId: null, pendingPersonId: null, parentRole: '' };
+  state.addIntent = emptyIntent({
+    kin: 'first',
+    pendingPersonId: canResume ? rec.pendingPersonId : null,
+  });
   setKinPressed('');
   updateAnchorLabel(null);
   el.sheet.classList.remove('hidden');
@@ -442,12 +611,17 @@ function showFirstPersonForm() {
   document.getElementById('sheet-kicker').textContent = '续写家谱';
   d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
   setFirstPersonChrome(true);
-  resetAddForm();
+  resetAddForm({ preservePending: canResume });
   state.addIntent.kin = 'first';
+  if (canResume) {
+    state.addIntent.pendingPersonId = rec.pendingPersonId;
+    el.addName.value = rec.name || '';
+    showError(el.addError, recoveryMessage(rec));
+  }
   el.addExistingWrap.classList.add('hidden');
   updateParentRoleVisibility('', null);
   el.addContext.textContent = addContextText('first');
-  showError(el.sheetError, '');
+  showRecoveryGuidance();
   el.sheet.scrollTop = 0;
   el.addName.focus();
 }
@@ -657,11 +831,17 @@ function siblingsOf(personId) {
 }
 
 
-function openSheet(node, { clearAddError = true } = {}) {
+function openSheet(node) {
   const personChanged = state.mode !== 'detail' || !sameId(state.selectedId, node.id);
   state.mode = 'detail';
   state.selectedId = node.id;
-  state.addIntent = { relation: '', anchorId: node.id, kin: '', pendingPersonId: null, parentRole: '' };
+  // Keep persisted recovery; only reset the ephemeral addIntent for detail view.
+  const pendingId = state.recovery?.pendingPersonId ?? null;
+  state.addIntent = emptyIntent({
+    anchorId: node.id,
+    pendingPersonId: pendingId,
+    parentRole: state.recovery?.parentRole || '',
+  });
   el.sheetDetail.classList.remove('hidden');
   el.sheet.classList.remove('hidden');
   el.formAdd.classList.add('hidden');
@@ -674,8 +854,8 @@ function openSheet(node, { clearAddError = true } = {}) {
     .classed('selected', (d) => sameId(d.id, node.id))
     .attr('aria-pressed', (d) => String(sameId(d.id, node.id)));
   el.setRoot.textContent = `从「${node.name}」看这棵家谱`;
+  showError(el.addError, '');
   showError(el.sheetError, '');
-  if (clearAddError) showError(el.addError, '');
 
   const rel = relationsFromEdges(node.id);
   const gender = genderWord(node.gender);
@@ -690,13 +870,17 @@ function openSheet(node, { clearAddError = true } = {}) {
   el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>`;
   el.setRoot.dataset.personId = String(node.id);
   if (personChanged) el.sheet.scrollTop = 0;
+  showRecoveryGuidance();
 }
 
 function closeSheet() {
-  const wasFirst = state.addIntent.kin === 'first';
+  const wasFirst = state.addIntent.kin === 'first' && !state.recovery;
   state.selectedId = null;
   state.mode = 'detail';
-  state.addIntent = { relation: '', anchorId: null, kin: '', pendingPersonId: null, parentRole: '' };
+  state.addIntent = emptyIntent({
+    pendingPersonId: state.recovery?.pendingPersonId ?? null,
+    parentRole: state.recovery?.parentRole || '',
+  });
   el.formAdd.classList.add('hidden');
   setKinPressed('');
   setFirstPersonChrome(false);
@@ -704,23 +888,31 @@ function closeSheet() {
   showError(el.addError, '');
   showError(el.sheetError, '');
   if (wasFirst || !findPerson(state.selectedId)) {
-    el.sheet.classList.add('hidden');
+    if (!state.recovery) el.sheet.classList.add('hidden');
   }
   d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
+  showRecoveryGuidance();
 }
 
 function cancelAdd() {
-  if (state.addIntent.kin === 'first' && state.persons.length === 0 && !state.addIntent.pendingPersonId) {
+  if (state.addIntent.kin === 'first' && state.persons.length === 0 && !state.recovery?.pendingPersonId) {
     closeSheet();
     return;
   }
-  const anchor = findPerson(state.selectedId) || findPerson(state.addIntent.anchorId);
+  const anchor = findPerson(state.selectedId) || findPerson(state.addIntent.anchorId) || findPerson(state.recovery?.anchorId);
   el.formAdd.classList.add('hidden');
   setKinPressed('');
-  state.addIntent = { relation: '', anchorId: anchor ? anchor.id : null, kin: '', pendingPersonId: null, parentRole: '' };
+  state.addIntent = emptyIntent({
+    anchorId: anchor ? anchor.id : null,
+    pendingPersonId: state.recovery?.pendingPersonId ?? null,
+    parentRole: state.recovery?.parentRole || '',
+  });
   showError(el.addError, '');
   if (anchor) openSheet(anchor);
-  else if (state.persons.length === 0) closeSheet();
+  else {
+    showRecoveryGuidance();
+    if (state.persons.length === 0 && !state.recovery) closeSheet();
+  }
 }
 
 async function setAsRoot() {
@@ -824,17 +1016,40 @@ function ensureRootForPerson(personId) {
   }
 }
 
+function buildRecoveryDraft({ target, kinKey, relation, anchor, parentRole, name, phase, message }) {
+  return {
+    userId: state.userId,
+    treeId: state.treeId || target?.tree_id || '',
+    pendingPersonId: target?.id ?? null,
+    kin: kinKey,
+    relation: relation || '',
+    anchorId: anchor?.id ?? null,
+    parentRole: parentRole || '',
+    name: name || target?.name || '',
+    phase,
+    message,
+  };
+}
+
+async function finishAddSuccess(target) {
+  clearRecovery();
+  await loadTree();
+  openSheet(findPerson(target.id) || target);
+}
+
 async function submitAdd(event) {
   event.preventDefault();
   if (state.saving) return;
   setSaving(true);
   showError(el.addError, '');
   try {
-    const kinKey = state.addIntent.kin;
+    const kinKey = state.addIntent.kin || state.recovery?.kin || '';
     const isFirst = kinKey === 'first';
     const kin = isFirst ? null : KIN[kinKey];
-    const relation = isFirst ? '' : (kin?.relation || state.addIntent.relation);
-    const anchor = isFirst ? null : findPerson(state.addIntent.anchorId || state.selectedId);
+    const relation = isFirst ? '' : (kin?.relation || state.addIntent.relation || state.recovery?.relation || '');
+    const anchor = isFirst
+      ? null
+      : findPerson(state.addIntent.anchorId || state.selectedId || state.recovery?.anchorId);
     if (!isFirst && (!kin || !anchor)) {
       showError(el.addError, '请先在树上点一位当前人，再选择要添加的关系。');
       return;
@@ -843,13 +1058,14 @@ async function submitAdd(event) {
       showError(el.addError, missingParentsMessage(anchor));
       return;
     }
+    let parentRole = '';
     if (relation === 'child') {
-      const role = childParentRole(anchor);
-      if (role !== 'father' && role !== 'mother') {
+      parentRole = childParentRole(anchor) || state.recovery?.parentRole || '';
+      if (parentRole !== 'father' && parentRole !== 'mother') {
         showError(el.addError, `还不确定「${anchor.name}」是父亲还是母亲，请先选择后再添孩子。`);
         return;
       }
-      state.addIntent.parentRole = role;
+      state.addIntent.parentRole = parentRole;
     }
 
     const existingId = el.addExisting && !el.addExistingWrap.classList.contains('hidden')
@@ -857,7 +1073,8 @@ async function submitAdd(event) {
       : '';
 
     if (existingId) {
-      const existing = findPerson(existingId);
+      let existing = findPerson(existingId);
+      if (!existing) existing = await fetchPersonById(existingId);
       if (!existing) {
         showError(el.addError, '请重新选择已经在谱里的那位亲人。');
         return;
@@ -865,9 +1082,25 @@ async function submitAdd(event) {
       if (relation === 'father') ensureParentSlot(anchor, 'father_id', existing.id);
       if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', existing.id);
       await bindPerson(existing, relation, anchor);
-      state.addIntent.pendingPersonId = null;
-      await loadTree();
-      openSheet(findPerson(existing.id) || existing);
+      try {
+        await finishAddSuccess(existing);
+      } catch (loadErr) {
+        writeRecovery(buildRecoveryDraft({
+          target: existing,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: existing.name,
+          phase: 'display_load_failed',
+          message: DISPLAY_LOAD_FAIL_MSG,
+        }));
+        state.addIntent.pendingPersonId = existing.id;
+        state.mode = 'add';
+        el.formAdd.classList.remove('hidden');
+        showError(el.addError, DISPLAY_LOAD_FAIL_MSG);
+        showError(el.sheetError, DISPLAY_LOAD_FAIL_MSG);
+      }
       return;
     }
 
@@ -875,15 +1108,26 @@ async function submitAdd(event) {
     if (relation === 'father') ensureParentSlot(anchor, 'father_id', null);
     if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', null);
 
+    const pendingId = state.addIntent.pendingPersonId || state.recovery?.pendingPersonId || null;
+    const phase = state.recovery?.phase || '';
+
     let target = null;
-    if (state.addIntent.pendingPersonId) {
-      await loadPersons();
-      target = findPerson(state.addIntent.pendingPersonId);
+    if (pendingId) {
+      try {
+        target = await fetchPersonById(pendingId);
+      } catch (_) {
+        target = null;
+      }
+      if (!target) {
+        await loadPersons();
+        target = findPerson(pendingId);
+      }
       if (!target) {
         showError(el.addError, '刚才记下的亲人找不到了，请重新添加。');
-        state.addIntent.pendingPersonId = null;
+        clearRecovery();
         return;
       }
+      state.addIntent.pendingPersonId = target.id;
     } else {
       const payload = {
         name: el.addName.value.trim(),
@@ -901,41 +1145,124 @@ async function submitAdd(event) {
         body: JSON.stringify(payload),
       });
       state.addIntent.pendingPersonId = target.id;
-      await loadPersons();
+      writeRecovery(buildRecoveryDraft({
+        target,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: payload.name,
+        phase: 'created_unbound',
+        message: PARTIAL_SAVE_MSG,
+      }));
+      try {
+        await loadPersons();
+      } catch (_) {
+        /* person exists; continue with returned payload */
+      }
+    }
+
+    // Saved person exists; display-load-only recovery skips bind.
+    if (phase === 'display_load_failed') {
+      if (isFirst) {
+        state.rootId = String(target.id);
+        localStorage.setItem(ROOT_KEY, state.rootId);
+      } else {
+        ensureRootForPerson(target.id);
+      }
+      try {
+        await finishAddSuccess(target);
+      } catch (loadErr) {
+        writeRecovery(buildRecoveryDraft({
+          target,
+          kinKey,
+          relation,
+          anchor,
+          parentRole,
+          name: target.name,
+          phase: 'display_load_failed',
+          message: DISPLAY_LOAD_FAIL_MSG,
+        }));
+        state.addIntent.pendingPersonId = target.id;
+        state.mode = 'add';
+        el.formAdd.classList.remove('hidden');
+        showError(el.addError, DISPLAY_LOAD_FAIL_MSG);
+        showError(el.sheetError, DISPLAY_LOAD_FAIL_MSG);
+      }
+      return;
     }
 
     try {
       if (!isFirst) await bindPerson(target, relation, anchor);
     } catch (bindErr) {
       const detail = bindErr.message ? `：${bindErr.message}` : '';
-      showError(el.addError, `${PARTIAL_SAVE_MSG}${detail}`);
+      const msg = `${PARTIAL_SAVE_MSG}${detail}`;
+      writeRecovery(buildRecoveryDraft({
+        target,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: target.name,
+        phase: 'bind_failed',
+        message: msg,
+      }));
+      showError(el.addError, msg);
+      showError(el.sheetError, msg);
       if (isFirst || !state.rootId) ensureRootForPerson(target.id);
       else ensureRootForPerson(state.rootId);
-      // Keep add mode + form so retry reuses pendingPersonId; do not openSheet (clears error).
       state.mode = 'add';
-      await loadPersons();
-      syncRootWithPersons();
-      if (state.rootId) {
-        try {
+      state.addIntent.pendingPersonId = target.id;
+      try {
+        await loadPersons();
+        syncRootWithPersons();
+        if (state.rootId) {
           state.tree = await api(`/persons/${state.rootId}/tree`);
           render();
-        } catch (_) {
-          /* tree may still be empty for unbound first/partial */
         }
-      }
+      } catch (_) { /* keep form + recovery */ }
       el.formAdd.classList.remove('hidden');
       return;
     }
 
-    state.addIntent.pendingPersonId = null;
+    // Bind (or first-person create) succeeded — do not clear recovery until display load works.
+    writeRecovery(buildRecoveryDraft({
+      target,
+      kinKey,
+      relation,
+      anchor,
+      parentRole,
+      name: target.name,
+      phase: 'display_load_pending',
+      message: DISPLAY_LOAD_FAIL_MSG,
+    }));
+    state.addIntent.pendingPersonId = target.id;
     if (isFirst) {
       state.rootId = String(target.id);
       localStorage.setItem(ROOT_KEY, state.rootId);
     } else {
       ensureRootForPerson(target.id);
     }
-    await loadTree();
-    openSheet(findPerson(target.id) || target);
+    try {
+      await loadPersons();
+      await finishAddSuccess(target);
+    } catch (loadErr) {
+      writeRecovery(buildRecoveryDraft({
+        target,
+        kinKey,
+        relation,
+        anchor,
+        parentRole,
+        name: target.name,
+        phase: 'display_load_failed',
+        message: DISPLAY_LOAD_FAIL_MSG,
+      }));
+      state.addIntent.pendingPersonId = target.id;
+      state.mode = 'add';
+      el.formAdd.classList.remove('hidden');
+      showError(el.addError, DISPLAY_LOAD_FAIL_MSG);
+      showError(el.sheetError, DISPLAY_LOAD_FAIL_MSG);
+    }
   } catch (err) {
     showError(el.addError, err.message);
   } finally {
@@ -970,7 +1297,9 @@ render();
 
 if (state.token) {
   setAuthed(true);
-  loadTree().catch(() => {
-    /* token may be stale */
-  });
+  loadTree()
+    .then(() => resumeRecoveryUi())
+    .catch(() => {
+      /* token may be stale */
+    });
 }

@@ -27,7 +27,7 @@ const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR
   : path.resolve(APP_ROOT, 'artifacts');
 
 /** Must match results logged by the ordered suite. Aborting early fails. */
-const EXPECTED_TEST_COUNT = 20;
+const EXPECTED_TEST_COUNT = 25;
 
 let browser;
 let page;
@@ -71,15 +71,15 @@ $app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();
 $u = App\\Models\\User::create(['name'=>'Iso','email'=>'${email}','password'=>bcrypt('password')]);
 $t = App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'Iso']);
 $p = App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'${personName}','generation'=>1,'gender'=>'${gender}']);
-echo $u->createToken('test')->plainTextToken.':'.$p->id;
+echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('test')->plainTextToken,'personId'=>$p->id], JSON_UNESCAPED_UNICODE);
 `
     : `<?php
 require '${APP_ROOT}/vendor/autoload.php';
 $app = require '${APP_ROOT}/bootstrap/app.php';
 $app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();
 $u = App\\Models\\User::create(['name'=>'Iso','email'=>'${email}','password'=>bcrypt('password')]);
-App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'Iso']);
-echo $u->createToken('test')->plainTextToken;
+$t = App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'Iso']);
+echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('test')->plainTextToken,'personId'=>null], JSON_UNESCAPED_UNICODE);
 `;
   const tmp = path.join(ARTIFACTS_DIR, `_tmp_seed_${Date.now()}.php`);
   fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
@@ -90,11 +90,24 @@ echo $u->createToken('test')->plainTextToken;
     throw new Error(`seed failed: ${result.stdout || ''}${result.stderr || ''}`);
   }
   const line = (result.stdout || '').trim().split('\n').filter(Boolean).pop();
-  if (withPerson) {
-    const [token, personId] = line.split(':');
-    return { email, token, personId };
-  }
-  return { email, token: line, personId: null };
+  const parsed = JSON.parse(line);
+  return {
+    email,
+    userId: String(parsed.userId),
+    treeId: String(parsed.treeId),
+    token: parsed.token,
+    personId: parsed.personId != null ? String(parsed.personId) : null,
+  };
+}
+
+async function injectAuth({ token, userId, treeId, rootId = null }) {
+  await page.evaluate((auth) => {
+    localStorage.setItem('yimai_token', auth.token);
+    localStorage.setItem('yimai_user_id', String(auth.userId));
+    if (auth.treeId) localStorage.setItem('yimai_tree_id', String(auth.treeId));
+    if (auth.rootId) localStorage.setItem('yimai_root_id', String(auth.rootId));
+    else localStorage.removeItem('yimai_root_id');
+  }, { token, userId, treeId, rootId });
 }
 
 async function setup() {
@@ -216,11 +229,13 @@ async function personByNameViaApi(name) {
   return list.find((p) => p.name === name) || null;
 }
 
-async function installBindFailHook() {
+async function installFetchHooks() {
   await page.evaluate(() => {
     if (window.__yimaiOrigFetch) return;
     window.__yimaiOrigFetch = window.fetch.bind(window);
     window.__yimaiFailNextBind = false;
+    window.__yimaiFailNextPersonsGet = false;
+    window.__yimaiFailNextTreeGet = false;
     window.__yimaiPostPersonCount = 0;
     window.fetch = async (input, init = {}) => {
       const url = String(input);
@@ -239,6 +254,28 @@ async function installBindFailHook() {
           { status: 422, headers: { 'Content-Type': 'application/json' } },
         );
       }
+      if (
+        window.__yimaiFailNextPersonsGet
+        && method === 'GET'
+        && /\/api\/v1\/persons\/?$/.test(url.replace(/\?.*$/, ''))
+      ) {
+        window.__yimaiFailNextPersonsGet = false;
+        return new Response(JSON.stringify({ message: 'forced persons load failure' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (
+        window.__yimaiFailNextTreeGet
+        && method === 'GET'
+        && /\/api\/v1\/persons\/\d+\/tree/.test(url)
+      ) {
+        window.__yimaiFailNextTreeGet = false;
+        return new Response(JSON.stringify({ message: 'forced tree load failure' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       return window.__yimaiOrigFetch(input, init);
     };
   });
@@ -246,6 +283,36 @@ async function installBindFailHook() {
 
 async function armBindFail() {
   await page.evaluate(() => { window.__yimaiFailNextBind = true; });
+}
+
+async function armTreeLoadFail() {
+  await page.evaluate(() => { window.__yimaiFailNextTreeGet = true; });
+}
+
+async function treeSnapshot() {
+  return page.evaluate(async () => {
+    const token = localStorage.getItem('yimai_token');
+    const root = localStorage.getItem('yimai_root_id');
+    const res = await fetch(`${window.location.origin}/api/v1/persons/${root}/tree`, {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+    });
+    const tree = await res.json();
+    const stats = document.getElementById('stats')?.textContent || '';
+    return {
+      root_id: tree.root_id,
+      nodeIds: (tree.nodes || []).map((n) => n.id).sort((a, b) => a - b),
+      parentEdges: (tree.edges || [])
+        .filter((e) => e.type === 'parent')
+        .map((e) => `${e.from}->${e.to}`)
+        .sort(),
+      spouseEdges: (tree.edges || [])
+        .filter((e) => e.type === 'spouse')
+        .map((e) => [e.a, e.b].sort((a, b) => a - b).join('-'))
+        .sort(),
+      stats,
+      canvasNodes: document.querySelectorAll('g.node-card').length,
+    };
+  });
 }
 
 async function screenshot(name) {
@@ -305,11 +372,15 @@ async function testPersonSelection() {
 
 async function testKinButtonsVisible() {
   const kinButtons = await page.$$('#kin-grid button[data-kin]');
+  const keys = await page.$$eval('#kin-grid button[data-kin]', (els) => els.map((e) => e.dataset.kin));
+  const expected = ['father', 'mother', 'elder_brother', 'elder_sister', 'younger_brother', 'younger_sister', 'son', 'daughter', 'husband', 'wife'];
+  const title = await page.$eval('#sheet-title', (el) => el.textContent);
   const anchorLabel = await page.$eval('#add-anchor-label', (el) => el.textContent).catch(() => '');
+  const labelOk = anchorLabel.includes(`当前人：${title}`);
   log(
-    'Kin buttons visible (父母哥姐弟妹儿女夫妻)',
-    kinButtons.length === 10,
-    `Found ${kinButtons.length}; anchorLabel="${anchorLabel}"`,
+    'Kin buttons visible and anchorLabel names current person',
+    kinButtons.length === 10 && expected.every((k) => keys.includes(k)) && labelOk,
+    `keys=${keys.join(',')}; anchorLabel="${anchorLabel}"; title="${title}"`,
   );
 }
 
@@ -349,26 +420,30 @@ async function testReloadButtonWorks() {
 
 async function testPersistedTokenReload() {
   const tokenBefore = await page.evaluate(() => localStorage.getItem('yimai_token'));
+  const before = await treeSnapshot();
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForFunction(() => {
     const stats = document.getElementById('stats');
     return stats && stats.textContent.includes('位亲人');
   }, { timeout: 10000 });
   const tokenAfter = await page.evaluate(() => localStorage.getItem('yimai_token'));
-  const nodes = await page.$$('g.node-card');
+  const after = await treeSnapshot();
+  const ok = tokenBefore === tokenAfter
+    && JSON.stringify(before.nodeIds) === JSON.stringify(after.nodeIds)
+    && JSON.stringify(before.parentEdges) === JSON.stringify(after.parentEdges)
+    && JSON.stringify(before.spouseEdges) === JSON.stringify(after.spouseEdges)
+    && before.stats === after.stats
+    && after.canvasNodes === after.nodeIds.length;
   log(
-    'Persisted token reload renders tree',
-    tokenBefore === tokenAfter && nodes.length > 0,
-    `Token persisted: ${tokenBefore === tokenAfter}, Nodes: ${nodes.length}`,
+    'Persisted token reload keeps node IDs, edges, and stats',
+    ok,
+    `nodes=${after.nodeIds.length}, parentEdges=${after.parentEdges.length}, spouseEdges=${after.spouseEdges.length}`,
   );
 }
 
 async function testFirstPersonStaleRootAndRefresh() {
-  const { token } = phpCreateUser();
-  await page.evaluate((t) => {
-    localStorage.setItem('yimai_token', t);
-    localStorage.setItem('yimai_root_id', '1'); // stale foreign id
-  }, token);
+  const { token, userId, treeId } = phpCreateUser();
+  await injectAuth({ token, userId, treeId, rootId: '1' });
   await page.reload({ waitUntil: 'networkidle0' });
   await sleep(500);
   const rootAfterBoot = await page.evaluate(() => localStorage.getItem('yimai_root_id'));
@@ -379,32 +454,45 @@ async function testFirstPersonStaleRootAndRefresh() {
   await waitForNodes(1);
   const beforeReload = await personsViaApi();
   const rootAfterAdd = await page.evaluate(() => localStorage.getItem('yimai_root_id'));
+  const snap = await treeSnapshot();
   await page.click('#btn-reload');
   await waitForNodes(1);
   const afterReload = await personsViaApi();
-  const nodes = await page.$$('g.node-card');
+  const snap2 = await treeSnapshot();
   const ok = rootAfterBoot !== '1'
-    && nodes.length === 1
+    && snap.nodeIds.length === 1
     && beforeReload.length === 1
     && afterReload.length === 1
     && String(rootAfterAdd) === String(beforeReload[0].id)
-    && String(afterReload[0].id) === String(beforeReload[0].id);
+    && String(afterReload[0].id) === String(beforeReload[0].id)
+    && JSON.stringify(snap.nodeIds) === JSON.stringify(snap2.nodeIds);
   log(
     'First person with stale rootId appears and persists on reload',
     ok,
-    `bootRoot=${rootAfterBoot}, rootAfterAdd=${rootAfterAdd}, ids=${beforeReload[0]?.id}->${afterReload[0]?.id}, nodes=${nodes.length}`,
+    `bootRoot=${rootAfterBoot}, rootAfterAdd=${rootAfterAdd}, ids=${beforeReload[0]?.id}->${afterReload[0]?.id}`,
   );
 }
 
 async function testAddChildWithParentRole() {
   await selectNodeByName('第一人甲');
+  const anchor = await personByNameViaApi('第一人甲');
   const before = await personCountViaApi();
   await addKin('son', '测试儿子', { parentRole: 'father' });
   await waitForNodes(2);
   const after = await personCountViaApi();
   const son = await personByNameViaApi('测试儿子');
-  const ok = after === before + 1 && son && Number(son.father_id) != null;
-  log('Add child works', ok, `count ${before}->${after}, son.father_id=${son?.father_id}`);
+  const snap = await treeSnapshot();
+  const edgeOk = snap.parentEdges.includes(`${anchor.id}->${son?.id}`);
+  const ok = after === before + 1
+    && son
+    && Number(son.father_id) === Number(anchor.id)
+    && son.mother_id == null
+    && edgeOk;
+  log(
+    'Add child works with exact father_id and tree edge',
+    ok,
+    `count ${before}->${after}, father_id=${son?.father_id} expect=${anchor.id}, edgeOk=${edgeOk}`,
+  );
 }
 
 async function testAddParent() {
@@ -431,6 +519,7 @@ async function testAddParent() {
 async function testAddSpouse() {
   await selectNodeByName('第一人甲');
   const before = await personCountViaApi();
+  const a = await personByNameViaApi('第一人甲');
   await addKin('wife', '测试妻子');
   await page.waitForFunction(
     () => document.querySelectorAll('g.node-card').length >= 4
@@ -439,25 +528,33 @@ async function testAddSpouse() {
   );
   await sleep(400);
   const after = await personCountViaApi();
-  const spouseEdges = await page.evaluate(async () => {
+  const wife = await personByNameViaApi('测试妻子');
+  const snap = await treeSnapshot();
+  const pair = [Number(a.id), Number(wife?.id)].sort((x, y) => x - y).join('-');
+  const bidir = snap.spouseEdges.includes(pair);
+  // From either person's tree JSON, spouse edge must appear.
+  const fromWifeRoot = await page.evaluate(async (wifeId) => {
     const token = localStorage.getItem('yimai_token');
-    const root = localStorage.getItem('yimai_root_id');
-    const res = await fetch(`${window.location.origin}/api/v1/persons/${root}/tree`, {
+    const res = await fetch(`${window.location.origin}/api/v1/persons/${wifeId}/tree`, {
       headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
     });
     const tree = await res.json();
-    return (tree.edges || []).filter((e) => e.type === 'spouse').length;
-  });
+    return (tree.edges || [])
+      .filter((e) => e.type === 'spouse')
+      .map((e) => [e.a, e.b].sort((x, y) => x - y).join('-'));
+  }, wife.id);
+  const ok = after === before + 1 && bidir && fromWifeRoot.includes(pair);
   log(
-    'Add spouse (wife) works',
-    after === before + 1 && spouseEdges >= 1,
-    `count ${before}->${after}, spouseEdges=${spouseEdges}`,
+    'Add spouse (wife) bidirectional on API/tree',
+    ok,
+    `count ${before}->${after}, pair=${pair}, rootEdges=${snap.spouseEdges.join(',')}, wifeRoot=${fromWifeRoot.join(',')}`,
   );
 }
 
 async function testAddSiblingWithKnownParent() {
   await selectNodeByName('测试儿子');
   const before = await personCountViaApi();
+  const sonBefore = await personByNameViaApi('测试儿子');
   await addKin('younger_brother', '测试弟弟');
   await page.waitForFunction(
     () => document.querySelectorAll('g.node-card').length >= 5
@@ -468,11 +565,22 @@ async function testAddSiblingWithKnownParent() {
   const after = await personCountViaApi();
   const son = await personByNameViaApi('测试儿子');
   const bro = await personByNameViaApi('测试弟弟');
-  const ok = after === before + 1 && bro && Number(bro.mother_id) === Number(son.mother_id);
+  const snap = await treeSnapshot();
+  const shareFather = son.father_id != null && Number(bro.father_id) === Number(son.father_id);
+  const shareMother = son.mother_id != null && Number(bro.mother_id) === Number(son.mother_id);
+  const fatherEdge = snap.parentEdges.includes(`${son.father_id}->${bro.id}`);
+  const motherEdge = snap.parentEdges.includes(`${son.mother_id}->${bro.id}`);
+  const ok = after === before + 1
+    && bro
+    && shareFather
+    && shareMother
+    && fatherEdge
+    && motherEdge
+    && Number(son.father_id) === Number(sonBefore.father_id);
   log(
-    'Add sibling with known parent works',
+    'Add sibling shares known father and mother with tree edges',
     ok,
-    `count ${before}->${after}, son.mother=${son?.mother_id}, bro.mother=${bro?.mother_id}`,
+    `father ${son?.father_id}/${bro?.father_id}, mother ${son?.mother_id}/${bro?.mother_id}, edges F=${fatherEdge} M=${motherEdge}`,
   );
 }
 
@@ -507,11 +615,8 @@ async function testExistingPersonRecognition() {
 }
 
 async function testMissingSiblingParentError() {
-  const { token, personId } = phpCreateUser({ withPerson: true, personName: '无父母者' });
-  await page.evaluate((t, id) => {
-    localStorage.setItem('yimai_token', t);
-    localStorage.setItem('yimai_root_id', id);
-  }, token, personId);
+  const { token, userId, treeId, personId } = phpCreateUser({ withPerson: true, personName: '无父母者' });
+  await injectAuth({ token, userId, treeId, rootId: personId });
   await page.reload({ waitUntil: 'networkidle0' });
   await waitForNodes(1);
   await selectNodeByName('无父母者');
@@ -531,15 +636,12 @@ async function testMissingSiblingParentError() {
 let partialBindCtx = null;
 
 async function testPartialCreateBindFailure() {
-  const { token, personId } = phpCreateUser({ withPerson: true, personName: '锚点人', gender: 'male' });
-  await page.evaluate((t, id) => {
-    localStorage.setItem('yimai_token', t);
-    localStorage.setItem('yimai_root_id', id);
-  }, token, personId);
+  const auth = phpCreateUser({ withPerson: true, personName: '锚点人', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
   await page.reload({ waitUntil: 'networkidle0' });
   await waitForNodes(1);
   await selectNodeByName('锚点人');
-  await installBindFailHook();
+  await installFetchHooks();
 
   const before = await personCountViaApi();
   await page.click('button[data-kin="son"]');
@@ -549,74 +651,157 @@ async function testPartialCreateBindFailure() {
   await page.click('#form-add button[type="submit"]');
   await page.waitForSelector('#add-error:not(.hidden)', { timeout: 10000 });
   await sleep(300);
-  const err = await page.$eval('#add-error', (el) => el.textContent);
-  const errVisible = await page.$eval('#add-error', (el) => !el.classList.contains('hidden'));
-  const formOpen = await page.$eval('#form-add', (el) => !el.classList.contains('hidden'));
+  // Navigate away to detail — recovery guidance must remain visible.
+  await selectNodeByName('锚点人');
+  await sleep(300);
+  const sheetErr = await page.$eval('#sheet-error', (el) => ({
+    t: el.textContent,
+    h: el.classList.contains('hidden'),
+  }));
+  const recovery = await page.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem('yimai_add_recovery') || 'null'); }
+    catch { return null; }
+  });
   const afterFail = await personCountViaApi();
   const child = await personByNameViaApi('半成儿子');
   const posts = await page.evaluate(() => window.__yimaiPostPersonCount);
-  const ok = errVisible
-    && err.includes('人已记下，关系未保存')
-    && formOpen
+  const ok = !sheetErr.h
+    && sheetErr.t.includes('人已记下，关系未保存')
     && afterFail === before + 1
     && child
     && child.father_id == null
-    && posts === 1;
-  partialBindCtx = { afterFail, childId: child?.id, posts };
+    && posts === 1
+    && recovery
+    && String(recovery.pendingPersonId) === String(child.id)
+    && recovery.kin === 'son'
+    && String(recovery.userId) === String(auth.userId);
+  partialBindCtx = { ...auth, afterFail, childId: child?.id, posts };
+  await screenshot('recovery-partial-bind-sheet.png');
   log(
-    'Partial create/bind shows persistent partial-save message',
+    'Partial bind keeps recovery message across detail navigation',
     ok,
-    `msg="${err.substring(0, 50)}", count ${before}->${afterFail}, posts=${posts}, formOpen=${formOpen}`,
+    `sheet="${sheetErr.t.substring(0, 40)}", id=${child?.id}, posts=${posts}`,
   );
 }
 
-async function testNaiveRetryReusesCreatedId() {
+async function testPartialRecoverySurvivesRefreshAndRetry() {
   if (!partialBindCtx?.childId) {
-    log('Naive retry reuses created id without duplicate POST', false, 'no partial-bind context');
+    log('Partial recovery survives F5 and retries without duplicate POST', false, 'no context');
     return;
   }
-  const beforeRetry = await personCountViaApi();
-  const postsBefore = await page.evaluate(() => window.__yimaiPostPersonCount);
-  // Form should still be open with pendingPersonId; submit again WITHOUT arming bind fail.
-  const formOpen = await page.$eval('#form-add', (el) => !el.classList.contains('hidden'));
+  const postsBefore = await page.evaluate(() => window.__yimaiPostPersonCount || 0);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await sleep(800);
+  await installFetchHooks();
+  await page.evaluate((n) => { window.__yimaiPostPersonCount = n; }, postsBefore);
+  // Recovery should reopen add form for son, or at least keep guidance.
+  await page.waitForFunction(() => {
+    const rec = localStorage.getItem('yimai_add_recovery');
+    const err = document.getElementById('sheet-error');
+    return rec && err && !err.classList.contains('hidden') && err.textContent.includes('人已记下');
+  }, { timeout: 10000 });
+  let formOpen = await page.$eval('#form-add', (el) => !el.classList.contains('hidden'));
   if (!formOpen) {
     await selectNodeByName('锚点人');
     await page.click('button[data-kin="son"]');
     await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+    formOpen = true;
   }
-  await page.click('#form-add button[type="submit"]');
-  await sleep(1200);
+  const beforeRetry = await personCountViaApi();
+  await page.evaluate(() => {
+    const btn = document.getElementById('btn-submit-add');
+    if (btn) btn.disabled = false;
+    document.getElementById('form-add').requestSubmit();
+  });
+  await sleep(1500);
   const afterRetry = await personCountViaApi();
   const postsAfter = await page.evaluate(() => window.__yimaiPostPersonCount);
   const sameName = (await personsViaApi()).filter((p) => p.name === '半成儿子');
   const child = sameName[0];
-  const ok = afterRetry === beforeRetry
+  const ok = formOpen
+    && afterRetry === beforeRetry
     && sameName.length === 1
     && String(child.id) === String(partialBindCtx.childId)
     && postsAfter === postsBefore
-    && child.father_id != null;
-  // Also verify refresh keeps same id
-  await page.reload({ waitUntil: 'networkidle0' });
-  await sleep(600);
-  const afterRefresh = (await personsViaApi()).filter((p) => p.name === '半成儿子');
-  const refreshOk = afterRefresh.length === 1 && String(afterRefresh[0].id) === String(partialBindCtx.childId);
+    && child.father_id != null
+    && Number(child.father_id) === Number(partialBindCtx.personId);
   log(
-    'Naive retry reuses created id without duplicate POST',
-    ok && refreshOk,
-    `count ${beforeRetry}->${afterRetry}, posts ${postsBefore}->${postsAfter}, id=${child?.id}, refreshId=${afterRefresh[0]?.id}`,
+    'Partial recovery survives F5 and retries without duplicate POST',
+    ok,
+    `count ${beforeRetry}->${afterRetry}, posts ${postsBefore}->${postsAfter}, id=${child?.id}, father_id=${child?.father_id} expect=${partialBindCtx.personId}`,
+  );
+}
+
+async function submitAddForm() {
+  await page.evaluate(() => {
+    const btn = document.getElementById('btn-submit-add');
+    if (btn) btn.disabled = false;
+    const form = document.getElementById('form-add');
+    if (!form || form.classList.contains('hidden')) throw new Error('add form not open');
+    form.requestSubmit();
+  });
+}
+
+async function testPostSaveLoadFailureRetryStable() {
+  const auth = phpCreateUser({ withPerson: true, personName: '载入锚点', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('载入锚点');
+  await installFetchHooks();
+  await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
+  await page.click('button[data-kin="daughter"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '载入女儿');
+  await armTreeLoadFail();
+  await submitAddForm();
+  await sleep(1200);
+  const err = await page.$eval('#add-error', (el) => el.textContent);
+  const sheetErr = await page.$eval('#sheet-error', (el) => el.textContent);
+  const afterFail = await personsViaApi();
+  const daughter = afterFail.find((p) => p.name === '载入女儿');
+  const posts1 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const msg = `${err} ${sheetErr}`;
+  const msgOk = msg.includes('关系已保存') && msg.includes('画面没有刷新成功');
+  // Ensure form still available for retry
+  const formOpen = await page.$eval('#form-add', (el) => !el.classList.contains('hidden'));
+  if (!formOpen) {
+    await selectNodeByName('载入锚点');
+    await page.click('button[data-kin="daughter"]');
+    await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  }
+  await submitAddForm();
+  await sleep(1200);
+  const afterRetry = await personsViaApi();
+  const posts2 = await page.evaluate(() => window.__yimaiPostPersonCount);
+  const same = afterRetry.filter((p) => p.name === '载入女儿');
+  await page.reload({ waitUntil: 'networkidle0' });
+  await sleep(700);
+  const afterRefresh = (await personsViaApi()).filter((p) => p.name === '载入女儿');
+  const ok = msgOk
+    && daughter
+    && posts1 === 1
+    && posts2 === 1
+    && same.length === 1
+    && String(same[0].id) === String(daughter.id)
+    && afterRefresh.length === 1
+    && String(afterRefresh[0].id) === String(daughter.id)
+    && Number(same[0].father_id) === Number(auth.personId);
+  await screenshot('recovery-display-load-fail.png');
+  log(
+    'Post-save tree load failure retries without duplicate person',
+    ok,
+    `msgOk=${msgOk}, posts ${posts1}->${posts2}, id=${daughter?.id}, father=${same[0]?.father_id}`,
   );
 }
 
 async function testDoubleSubmitDoesNotDuplicate() {
-  const { token, personId } = phpCreateUser({ withPerson: true, personName: '双击锚点', gender: 'male' });
-  await page.evaluate((t, id) => {
-    localStorage.setItem('yimai_token', t);
-    localStorage.setItem('yimai_root_id', id);
-  }, token, personId);
+  const auth = phpCreateUser({ withPerson: true, personName: '双击锚点', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
   await page.reload({ waitUntil: 'networkidle0' });
   await waitForNodes(1);
   await selectNodeByName('双击锚点');
-  await installBindFailHook(); // for post counter
+  await installFetchHooks();
   await page.evaluate(() => { window.__yimaiPostPersonCount = 0; });
   await page.click('button[data-kin="daughter"]');
   await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
@@ -636,46 +821,77 @@ async function testDoubleSubmitDoesNotDuplicate() {
   );
 }
 
-async function testParentOverwriteBlocked() {
-  const { token, personId } = phpCreateUser({ withPerson: true, personName: '孩子甲', gender: 'male' });
-  await page.evaluate((t, id) => {
-    localStorage.setItem('yimai_token', t);
-    localStorage.setItem('yimai_root_id', id);
-  }, token, personId);
+async function testParentOverwriteBlockedFatherAndMother() {
+  const auth = phpCreateUser({ withPerson: true, personName: '孩子甲', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
   await page.reload({ waitUntil: 'networkidle0' });
   await waitForNodes(1);
   await selectNodeByName('孩子甲');
   await addKin('father', '父亲甲');
   await sleep(700);
-  const afterFirst = await personByNameViaApi('孩子甲');
+  await selectNodeByName('孩子甲');
+  await addKin('mother', '母亲甲');
+  await sleep(700);
+  const child = await personByNameViaApi('孩子甲');
   const fatherA = await personByNameViaApi('父亲甲');
-  const countAfterFirst = await personCountViaApi();
+  const motherA = await personByNameViaApi('母亲甲');
+  const countBase = await personCountViaApi();
+  const snapBase = await treeSnapshot();
 
+  // New-person father conflict
   await selectNodeByName('孩子甲');
   await page.click('button[data-kin="father"]');
   await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
   await page.type('#add-name', '父亲乙');
   await page.click('#form-add button[type="submit"]');
-  await sleep(800);
-  const err = await page.$eval('#add-error', (el) => el.textContent);
-  const errVisible = await page.$eval('#add-error', (el) => !el.classList.contains('hidden'));
-  const afterSecond = await personByNameViaApi('孩子甲');
-  const fatherB = await personByNameViaApi('父亲乙');
-  const countAfterSecond = await personCountViaApi();
-  const blocked = errVisible
-    && err.includes('已经记过父亲')
-    && Number(afterSecond.father_id) === Number(fatherA.id)
-    && !fatherB
-    && countAfterSecond === countAfterFirst;
+  await sleep(700);
+  const errF = await page.$eval('#add-error', (el) => el.textContent);
+  // New-person mother conflict
+  await selectNodeByName('孩子甲');
+  await page.click('button[data-kin="mother"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '母亲乙');
+  await page.click('#form-add button[type="submit"]');
+  await sleep(700);
+  const errM = await page.$eval('#add-error', (el) => el.textContent);
+
+  // Existing-person conflict: try bind 第一人-style wrong parent via 父亲甲 onto mother slot using another person
+  await selectNodeByName('孩子甲');
+  await page.click('button[data-kin="mother"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.evaluate(() => {
+    const sel = document.getElementById('add-existing');
+    const opt = Array.from(sel.options).find((o) => o.textContent.includes('父亲甲'));
+    if (!opt) throw new Error('父亲甲 missing for existing conflict');
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.click('#form-add button[type="submit"]');
+  await sleep(700);
+  const errExisting = await page.$eval('#add-error', (el) => el.textContent);
+
+  const childAfter = await personByNameViaApi('孩子甲');
+  const countAfter = await personCountViaApi();
+  const snapAfter = await treeSnapshot();
+  const noFatherB = !(await personByNameViaApi('父亲乙'));
+  const noMotherB = !(await personByNameViaApi('母亲乙'));
+  const ok = errF.includes('已经记过父亲')
+    && errM.includes('已经记过母亲')
+    && errExisting.includes('已经记过母亲')
+    && Number(childAfter.father_id) === Number(fatherA.id)
+    && Number(childAfter.mother_id) === Number(motherA.id)
+    && countAfter === countBase
+    && noFatherB
+    && noMotherB
+    && JSON.stringify(snapBase.parentEdges) === JSON.stringify(snapAfter.parentEdges);
   log(
-    'Parent overwrite blocked before creating another person',
-    blocked,
-    `father_id stays ${afterFirst?.father_id}->${afterSecond?.father_id}; count ${countAfterFirst}->${countAfterSecond}; err="${err.substring(0, 40)}"`,
+    'Father/mother overwrite blocked for new and existing selection',
+    ok,
+    `father ${child.father_id}->${childAfter.father_id}, mother ${child.mother_id}->${childAfter.mother_id}, count ${countBase}->${countAfter}`,
   );
 }
 
 async function testIdempotentSameFatherBind() {
-  // Re-bind same existing father should succeed without error / without changing id.
   await selectNodeByName('孩子甲');
   const before = await personByNameViaApi('孩子甲');
   const countBefore = await personCountViaApi();
@@ -697,6 +913,130 @@ async function testIdempotentSameFatherBind() {
     'Idempotent same-father bind does not conflict',
     Number(after.father_id) === Number(before.father_id) && countAfter === countBefore && errHidden,
     `father_id=${after?.father_id}, count ${countBefore}->${countAfter}`,
+  );
+}
+
+async function testApiRejectsParentOverwrite() {
+  // Direct API check (backend guard), not only UI.
+  const auth = phpCreateUser({ withPerson: true, personName: 'API孩子', gender: 'male' });
+  const result = await page.evaluate(async (a) => {
+    const headers = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${a.token}`,
+    };
+    const f1 = await fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: 'API父甲', gender: 'male', generation: 1 }),
+    }).then((r) => r.json());
+    const f2 = await fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: 'API父乙', gender: 'male', generation: 1 }),
+    }).then((r) => r.json());
+    await fetch(`/api/v1/persons/${a.personId}`, {
+      method: 'PATCH', headers, body: JSON.stringify({ father_id: f1.id }),
+    });
+    const overwrite = await fetch(`/api/v1/persons/${a.personId}`, {
+      method: 'PATCH', headers, body: JSON.stringify({ father_id: f2.id }),
+    });
+    const body = await overwrite.json();
+    const show = await fetch(`/api/v1/persons/${a.personId}`, { headers }).then((r) => r.json());
+    return { status: overwrite.status, father_id: show.father_id, expect: f1.id, msg: body.message || JSON.stringify(body.errors || {}) };
+  }, auth);
+  log(
+    'API rejects silent father overwrite',
+    result.status === 422 && Number(result.father_id) === Number(result.expect),
+    `status=${result.status}, father_id=${result.father_id}, msg=${String(result.msg).substring(0, 60)}`,
+  );
+}
+
+async function testSisterHusbandAndYoungerSisterOps() {
+  // Coverage gap close-out: 姐 / 夫 / 妹 within existing small flow.
+  await selectNodeByName('测试儿子');
+  const son = await personByNameViaApi('测试儿子');
+  const before = await personCountViaApi();
+  await addKin('elder_sister', '测试姐姐');
+  await sleep(700);
+  const sister = await personByNameViaApi('测试姐姐');
+  await selectNodeByName('测试妻子');
+  const wife = await personByNameViaApi('测试妻子');
+  await addKin('husband', '测试丈夫');
+  await sleep(700);
+  const husband = await personByNameViaApi('测试丈夫');
+  await selectNodeByName('测试儿子');
+  await addKin('younger_sister', '测试妹妹');
+  await sleep(700);
+  const younger = await personByNameViaApi('测试妹妹');
+  const after = await personCountViaApi();
+  const snap = await treeSnapshot();
+  const sisterSharesParents = sister
+    && Number(sister.father_id) === Number(son.father_id)
+    && Number(sister.mother_id) === Number(son.mother_id);
+  const youngerSharesParents = younger
+    && Number(younger.father_id) === Number(son.father_id)
+    && Number(younger.mother_id) === Number(son.mother_id);
+  const husbandPair = husband && wife
+    ? [Number(wife.id), Number(husband.id)].sort((a, b) => a - b).join('-')
+    : '';
+  const husbandEdge = husbandPair && snap.spouseEdges.includes(husbandPair);
+  const ok = after === before + 3
+    && sisterSharesParents
+    && youngerSharesParents
+    && husbandEdge
+    && snap.parentEdges.includes(`${son.father_id}->${sister.id}`)
+    && snap.parentEdges.includes(`${son.father_id}->${younger.id}`);
+  log(
+    '姐/妹/夫 operations create exact shared-parent and spouse edges',
+    ok,
+    `count ${before}->${after}, sisterF=${sister?.father_id}, youngerF=${younger?.father_id}, husbandEdge=${husbandEdge}`,
+  );
+}
+
+async function testSetRootPerspective() {
+  const beforeRoot = await page.evaluate(() => localStorage.getItem('yimai_root_id'));
+  await selectNodeByName('测试妻子');
+  const wife = await personByNameViaApi('测试妻子');
+  await page.click('#btn-set-root');
+  await sleep(800);
+  const afterRoot = await page.evaluate(() => localStorage.getItem('yimai_root_id'));
+  const snap = await treeSnapshot();
+  const mark = await page.evaluate(() => {
+    const rootCard = document.querySelector('g.node-card.root .person-name');
+    return rootCard ? rootCard.textContent : '';
+  });
+  const ok = String(afterRoot) === String(wife.id)
+    && Number(snap.root_id) === Number(wife.id)
+    && mark.includes('测试妻子')
+    && String(beforeRoot) !== String(afterRoot);
+  // Restore original root for later same-root comparisons where useful.
+  await selectNodeByName('第一人甲');
+  await page.click('#btn-set-root');
+  await sleep(500);
+  log(
+    '从TA看 reroot updates root_id and current-perspective mark',
+    ok,
+    `root ${beforeRoot}->${afterRoot}, tree.root_id=${snap.root_id}, mark=${mark}`,
+  );
+}
+
+async function testRelationChangesPersistAfterRefresh() {
+  const before = await treeSnapshot();
+  await page.click('#btn-reload');
+  await sleep(800);
+  const mid = await treeSnapshot();
+  await page.reload({ waitUntil: 'networkidle0' });
+  await sleep(800);
+  const after = await treeSnapshot();
+  const ok = JSON.stringify(before.nodeIds) === JSON.stringify(mid.nodeIds)
+    && JSON.stringify(before.parentEdges) === JSON.stringify(mid.parentEdges)
+    && JSON.stringify(before.spouseEdges) === JSON.stringify(mid.spouseEdges)
+    && JSON.stringify(before.nodeIds) === JSON.stringify(after.nodeIds)
+    && JSON.stringify(before.parentEdges) === JSON.stringify(after.parentEdges)
+    && JSON.stringify(before.spouseEdges) === JSON.stringify(after.spouseEdges)
+    && before.stats === after.stats
+    && after.canvasNodes === after.nodeIds.length;
+  log(
+    'After relation changes, reload/refresh keep API edges/stats/canvas aligned',
+    ok,
+    `nodes=${after.nodeIds.length}, parents=${after.parentEdges.length}, spouses=${after.spouseEdges.length}, stats=${after.stats}`,
   );
 }
 
@@ -725,12 +1065,17 @@ async function runAllTests() {
     testAddSpouse,
     testAddSiblingWithKnownParent,
     testExistingPersonRecognition,
+    testSisterHusbandAndYoungerSisterOps,
+    testSetRootPerspective,
+    testRelationChangesPersistAfterRefresh,
     testMissingSiblingParentError,
     testPartialCreateBindFailure,
-    testNaiveRetryReusesCreatedId,
+    testPartialRecoverySurvivesRefreshAndRetry,
+    testPostSaveLoadFailureRetryStable,
     testDoubleSubmitDoesNotDuplicate,
-    testParentOverwriteBlocked,
+    testParentOverwriteBlockedFatherAndMother,
     testIdempotentSameFatherBind,
+    testApiRejectsParentOverwrite,
   ];
 
   try {
