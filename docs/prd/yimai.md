@@ -4,6 +4,40 @@
 
 ---
 
+## Binding cut — 2026-11-11 delete-correction (APPROVED)
+
+**Decision needed:** ~~approve single-person confirmed delete + specified relationship correction~~ → **APPROVED**（Boss via Master / user 2026-11-11；Cursor Auto only）。  
+**Visual addendum（同日 15:49 Asia/Shanghai）：** 宣纸/墨/朱砂视觉收束 + 响应式 CSS 折行 **APPROVED**；与本 cut **同一工程 PR**，先 DEL 行为后视觉，再合并回归。不另开竞争分支。
+
+**本 cut 并列于：** 同日 Explicit siblings cut（**不取代**兄弟姐妹 cut）。修订/例外：允许「删除确认 UI」与「父母/配偶/显式兄妹指定解除 UI」进入 In；其余 2026-11-06 Out 仍有效。
+
+**一句话结果：** 用户能凭详情中的姓名与 **谱号** 确认后，只删除这一人（不级联整支）；也能对指定关系纠错（清空父母、解除指定夫妻或显式兄妹）；有子女时继续按原 AC-5 保护并指引解绑，不强迫删除真实子女或配偶。
+
+### In
+- 删除确认 UI：姓名 + 谱号 {id}；确认后只删该 id；取消无人/边变化
+- 关系纠错 UI：清空指定父/母槽；`DELETE` 指定 spouse/sibling `link_id`
+- 删后收尾：关详情 / 根与视角 / 空谱添加首人（DEL-6）
+- 失败与未知：不假成功；按发出请求时原 id 核对后可安全重试（DEL-7）
+- 有子女：409 + 中文原因 + 打开子女纠错；配偶不阻断
+- 不新增 API 端点；沿用 `DELETE /persons/{id}`、`PATCH` 父母置空、`DELETE /spouse-links/{id}`、`DELETE /sibling-links/{id}`
+- 视觉（同 PR）：token/对比/焦点/忙态 aria-busy/取消整页 min-width:760 的 CSS 折行；不改既有业务文案
+
+### Out
+- 级联删除家族、回收站、批量删除、养父母、排行重排、自动迁移、占位人、来源筛选 UI
+- 把有配偶改成删人阻断；新云调用；独立全局换肤产品重做；合并/部署未授权
+
+### Acceptance：DEL-1…DEL-7
+见上传 binding cut 与 `docs/superpowers/specs/2026-11-11-delete-correction-design.md`。Proof：screenshot + API JSON。原 AC-5、AC-6、SIB-AC 与登录/加载/幂等/非传递/首人恢复不得削弱。QA 高风险 DEL-H-01…24 与 REG 清单为预言/夹具，不扩产品范围。视觉 VIS 与组件规格见 `docs/design/yimai-visual-component-spec-2026-11-11.md`。
+
+### 工程约束摘要
+- 谱号统一（新 DEL 控件不用冲突的「ID」标签）
+- 204 成功不要求 JSON 解析；409 保留英文 `children` 消息供旧测，可附加 `children[]`
+- 冻结确认时原 person/link/slot；禁止乐观假删；未知结果不得当成功
+- FK `nullOnDelete` **不**等同严格 409；以应用层检查 + 事务复核评估安全
+- 禁止写入原 Mac/demo 18 人谱；隔离夹具（新库 id=1 合法）
+
+---
+
 ## Binding cut — 2026-11-11 Explicit siblings (APPROVED)
 
 **Decision needed:** ~~approve explicit two-person sibling links independent of parents~~ → **APPROVED**（Boss via Master / user 2026-11-11；Cursor Auto only for eng）。
@@ -173,9 +207,10 @@ QA: pass if 不能读写他人 tree 的 persons/links（401/403/404，不得 200
 ## PM review
 
 - 活着的 SoT 路径：`docs/prd/yimai.md`（本节优先于口头/聊天补充）。
-- 开放 cut：2026-11-11 Explicit siblings（APPROVED）；底层 2026-11-06 AC-1…AC-6 仍有效且不得回退。
-- Eng path：Cursor Auto only（user 2026-11-11）；设计见 `docs/superpowers/specs/2026-11-11-explicit-siblings-design.md`。
-- UI defaults（Boss）：单击节点只开 sheet、不换根；不做「我」标记；父母拆两个入口；配偶 start/end/note UI 全藏；tree JSON 字段名按 cut 锁定（含 sibling）。
+- 开放 cut：2026-11-11 delete-correction（APPROVED，含同日视觉收束）；2026-11-11 Explicit siblings（APPROVED，并列不取代）；底层 2026-11-06 AC-1…AC-6 仍有效且不得回退。
+- Eng path：Cursor Auto only（user 2026-11-11）；DEL 设计见 `docs/superpowers/specs/2026-11-11-delete-correction-design.md`；视觉见 `docs/design/yimai-visual-component-spec-2026-11-11.md`；兄弟姐妹见 `docs/superpowers/specs/2026-11-11-explicit-siblings-design.md`。
+- UI defaults（Boss）：单击节点只开 sheet、不换根；不做「我」标记；父母拆两个入口；配偶 start/end/note UI 全藏；tree JSON 字段名按 cut 锁定（含 sibling）；新 DEL 控件统一谱号。
 - **过时限制作废：** 「添兄弟姐妹必须先有父母并复制 parent IDs」（旧 R3 / sibling-parent-copy gate）。
 - 仓库已钉死：`owner/repo = mojunyu/yimai`（SoT：https://github.com/mojunyu/yimai/blob/main/docs/prd/yimai.md）。
 - AC-5/AC-6 Feature proof：见 `docs/qa/ac-5-6-evidence.md`（PersonAc5Test + TreeIsolationAc6Test）。
+- 合并与部署仍未授权；独立 SWE/QA 验收由 Master 后续安排。
