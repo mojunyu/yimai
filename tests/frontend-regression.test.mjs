@@ -1987,14 +1987,22 @@ async function testExistingSiblingByConcreteIdSameName() {
     }).then((r) => r.json());
     const sameA = await fetch('/api/v1/persons', {
       method: 'POST', headers, body: JSON.stringify({
-        name: '同名丁', gender: 'male', generation: 2, father_id: fatherX.id,
+        name: '同名丁', gender: 'male', generation: 2,
       }),
     }).then((r) => r.json());
+    await fetch(`/api/v1/persons/${sameA.id}`, {
+      method: 'PATCH', headers, body: JSON.stringify({ father_id: fatherX.id }),
+    });
+    sameA.father_id = fatherX.id;
     const sameB = await fetch('/api/v1/persons', {
       method: 'POST', headers, body: JSON.stringify({
-        name: '同名丁', gender: 'female', generation: 2, father_id: fatherY.id,
+        name: '同名丁', gender: 'female', generation: 2,
       }),
     }).then((r) => r.json());
+    await fetch(`/api/v1/persons/${sameB.id}`, {
+      method: 'PATCH', headers, body: JSON.stringify({ father_id: fatherY.id }),
+    });
+    sameB.father_id = fatherY.id;
     const unknown = await fetch('/api/v1/persons', {
       method: 'POST', headers, body: JSON.stringify({ name: '同名丁', gender: 'unknown', generation: 1 }),
     }).then((r) => r.json());
@@ -2094,23 +2102,26 @@ async function testSiblingDoubleClickCreatesOnePersonAndOneLink() {
   );
 
   // Link-only repeat (existing ID) must stay one edge / one person.
-  await selectNodeByName('双击兄锚');
+  // After a successful bind the sheet returns to detail; re-open for each repeat.
   await installFetchHooks();
   await page.evaluate(() => {
     window.__yimaiPostPersonCount = 0;
     window.__yimaiPostSiblingLinkCount = 0;
   });
-  await page.click('button[data-kin="younger_sister"]');
-  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
-  await page.evaluate((id) => {
-    const sel = document.getElementById('add-existing');
-    sel.value = String(id);
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-  }, sisters[0].id);
-  await submitAddForm();
-  await sleep(700);
-  await submitAddForm();
-  await sleep(700);
+  async function bindExistingSisterOnce() {
+    await selectNodeByName('双击兄锚');
+    await page.click('button[data-kin="younger_sister"]');
+    await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+    await page.evaluate((id) => {
+      const sel = document.getElementById('add-existing');
+      sel.value = String(id);
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }, sisters[0].id);
+    await submitAddForm();
+    await sleep(800);
+  }
+  await bindExistingSisterOnce();
+  await bindExistingSisterOnce();
   const posts2 = await page.evaluate(() => ({
     person: window.__yimaiPostPersonCount,
     sib: window.__yimaiPostSiblingLinkCount,
@@ -2121,7 +2132,7 @@ async function testSiblingDoubleClickCreatesOnePersonAndOneLink() {
   const ok2 = sisters2.length === 1
     && posts2.person === 0
     && edgesForPair.length === 1
-    && posts2.sib >= 1;
+    && posts2.sib >= 2;
   log(
     'SIB link-only repeat on existing ID: still one person and one edge',
     ok2,
