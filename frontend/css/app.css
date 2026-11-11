@@ -163,7 +163,32 @@ h1 { margin: 0; font-family: var(--serif); font-size: 29px; font-weight: 600; le
 .empty .empty-title { font-family: var(--serif); font-size: 24px; color: var(--ink); letter-spacing: 0.08em; }
 .empty .hint { margin-top: 16px; font-size: 12px; }
 
-.sheet { flex: 0 0 388px; min-width: 0; border-left: 1px solid var(--line); background: var(--panel); padding: 28px; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.sheet {
+  flex: 0 0 388px;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  padding: 28px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.sheet.confirm-open {
+  overflow: hidden;
+}
+.sheet.confirm-open .sheet-head {
+  flex: 0 0 auto;
+}
+.child-correct-list {
+  margin: 12px 0 0;
+  padding-left: 1.2em;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.child-correct-list li { margin: 0 0 4px; }
 .sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 22px; border-bottom: 1px solid var(--line); margin-bottom: 22px; }
 .sheet-head .eyebrow { color: var(--accent); }
 .sheet-head h2 { margin: 0; font-family: var(--serif); font-size: 30px; font-weight: 600; line-height: 1.5; letter-spacing: 0.07em; overflow-wrap: anywhere; }
@@ -201,10 +226,15 @@ button.danger-ghost:hover:not(:disabled) {
 .sheet-confirm {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding-bottom: 18px;
-  margin-bottom: 18px;
-  border-bottom: 1px solid var(--line);
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow: auto;
+  padding: 0 0 8px;
+  margin: 0;
+  border-bottom: 0;
+  -webkit-overflow-scrolling: touch;
 }
 .sheet-confirm .confirm-title {
   margin: 0;
@@ -214,17 +244,31 @@ button.danger-ghost:hover:not(:disabled) {
   line-height: 1.5;
   letter-spacing: 0.04em;
   overflow-wrap: anywhere;
+  flex: 0 0 auto;
 }
-.sheet-confirm .confirm-body { font-size: 13px; line-height: 1.9; overflow-wrap: anywhere; }
+.sheet-confirm .confirm-body {
+  font-size: 13px;
+  line-height: 1.9;
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .sheet-confirm .confirm-identity { margin: 0 0 10px; font-family: var(--serif); }
 .sheet-confirm .confirm-actions {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex: 0 0 auto;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin-top: auto;
+  padding: 12px 0 4px;
+  background: linear-gradient(180deg, #fffdf800 0%, var(--panel) 28%, var(--panel) 100%);
+  border-top: 1px solid var(--line);
 }
 .sheet-confirm .confirm-actions button { width: 100%; }
-.child-correct-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.child-correct-list button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+.sheet-confirm .form-error { flex: 0 0 auto; }
 button.danger-solid {
   background: var(--accent);
   border-color: var(--accent);
@@ -249,6 +293,12 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
 .sheet-summary { font-family: var(--serif); font-size: 14px; line-height: 2; overflow-wrap: anywhere; }
 .sheet-summary p { margin: 0 0 18px; }
 .sheet-summary .biography-kin { color: var(--muted); font-size: 13px; }
+.sheet-summary .inferred-sibling-note {
+  margin: -8px 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
 .biography-kin span { display: block; }
 .sheet-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .perspective-action button { width: 100%; overflow-wrap: anywhere; }
@@ -341,6 +391,17 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
   .sheet { flex: 1 1 auto; flex-basis: auto; width: 100%; max-width: none; border-left: 0; border-top: 1px solid var(--line); padding: 22px; }
   .canvas-heading > span:last-child { display: none; }
   .legend { gap: 12px; flex-wrap: wrap; }
+  /* Confirm must be viewport-bounded with internal scroll; do not leave title stranded under the canvas. */
+  .layout:has(.sheet.confirm-open) .canvas-wrap {
+    flex: 0 1 18vh;
+    min-height: 0;
+    max-height: 22vh;
+  }
+  .sheet.confirm-open {
+    flex: 1 1 auto;
+    min-height: 52vh;
+    max-height: calc(100dvh - 120px);
+  }
 }
 @media (max-width: 768px) {
   .topbar { flex-wrap: wrap; gap: 16px; padding: 12px 16px; min-height: 0; }
@@ -350,6 +411,10 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
   .workspace-tools { align-items: stretch; width: 100%; }
   .toolbar-actions { flex-wrap: wrap; }
   .sheet { padding: 16px; }
+  .sheet.confirm-open {
+    min-height: 58vh;
+    max-height: calc(100dvh - 96px);
+  }
   .kin-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .form-pair { grid-template-columns: 1fr; }
 }

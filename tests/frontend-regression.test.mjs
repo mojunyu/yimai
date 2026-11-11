@@ -10,6 +10,7 @@
  */
 
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -2238,6 +2239,10 @@ async function testRelationChangesPersistAfterRefresh() {
   );
 }
 
+function fileSha(rel) {
+  return createHash('sha256').update(fs.readFileSync(path.join(APP_ROOT, rel))).digest('hex');
+}
+
 async function runAllTests() {
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   console.log('\n一脉 Frontend Regression Tests\n' + '='.repeat(50));
@@ -2247,6 +2252,32 @@ async function runAllTests() {
   console.log(`EXPECTED_TEST_COUNT=${EXPECTED_TEST_COUNT}`);
   console.log(`startedAt=${startedAt.toISOString()} tz=${tz}`);
   console.log('='.repeat(50));
+
+  fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: APP_ROOT, encoding: 'utf8' }).stdout.trim();
+  const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: APP_ROOT, encoding: 'utf8' }).stdout.trim();
+  const sourceHashes = {
+    'frontend/js/app.js': fileSha('frontend/js/app.js'),
+    'frontend/css/app.css': fileSha('frontend/css/app.css'),
+    'app/Http/Controllers/Api/V1/PersonController.php': fileSha('app/Http/Controllers/Api/V1/PersonController.php'),
+  };
+  const servedHashes = {
+    appJs: createHash('sha256').update(Buffer.from(await (await fetch(`${BASE_URL}/app/js/app.js`)).arrayBuffer())).digest('hex'),
+    appCss: createHash('sha256').update(Buffer.from(await (await fetch(`${BASE_URL}/app/css/app.css`)).arrayBuffer())).digest('hex'),
+  };
+  const suiteProvenance = {
+    head,
+    dirty: Boolean(dirty),
+    startedAt: startedAt.toISOString(),
+    sourceHashes,
+    servedHashes,
+    servedMatchesSource: {
+      js: servedHashes.appJs === sourceHashes['frontend/js/app.js'],
+      css: servedHashes.appCss === sourceHashes['frontend/css/app.css'],
+    },
+  };
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'suite-start-provenance.json'), JSON.stringify(suiteProvenance, null, 2));
+  console.log(JSON.stringify({ event: 'suite_start', head, servedMatchesSource: suiteProvenance.servedMatchesSource }, null, 2));
 
   const ordered = [
     testPageLoads,
@@ -2332,6 +2363,11 @@ async function runAllTests() {
   console.log(`endedAt=${endedAt.toISOString()} durationMs=${endedAt - startedAt}`);
   if (fatalError) console.log(`Fatal error: ${fatalError.message || fatalError}`);
 
+  const endHashes = {
+    'frontend/js/app.js': fileSha('frontend/js/app.js'),
+    'frontend/css/app.css': fileSha('frontend/css/app.css'),
+    'app/Http/Controllers/Api/V1/PersonController.php': fileSha('app/Http/Controllers/Api/V1/PersonController.php'),
+  };
   const evidencePath = path.join(ARTIFACTS_DIR, 'frontend-regression-results.json');
   const payload = {
     passed,
@@ -2343,6 +2379,13 @@ async function runAllTests() {
     results,
     appRoot: APP_ROOT,
     baseUrl: BASE_URL,
+    head,
+    sourceHashesStart: sourceHashes,
+    sourceHashesEnd: endHashes,
+    sourceStable: JSON.stringify(sourceHashes) === JSON.stringify(endHashes),
+    servedHashes,
+    servedMatchesSource: suiteProvenance.servedMatchesSource,
+    dirtyAtStart: Boolean(dirty),
     startedAt: startedAt.toISOString(),
     endedAt: endedAt.toISOString(),
     timezone: tz,
@@ -2350,6 +2393,7 @@ async function runAllTests() {
   };
   fs.writeFileSync(evidencePath, JSON.stringify(payload, null, 2));
   console.log(`Evidence: ${evidencePath}`);
+  console.log(`head=${head} sourceStable=${payload.sourceStable} servedJsMatch=${payload.servedMatchesSource.js}`);
 
   if (!countOk) console.log(`\nExpected ${expected} results but got ${total}.`);
   if (passed < total || fatalError) {
@@ -2359,7 +2403,7 @@ async function runAllTests() {
     });
   }
 
-  if (!allPassed) process.exit(1);
+  if (!allPassed || !payload.sourceStable || !payload.servedMatchesSource.js) process.exit(1);
   process.exit(0);
 }
 

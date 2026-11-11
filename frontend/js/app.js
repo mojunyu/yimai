@@ -114,6 +114,49 @@ function emptySheetOp() {
   return null;
 }
 
+function currentAuthority() {
+  return {
+    userId: state.userId ? String(state.userId) : '',
+    treeId: state.treeId ? String(state.treeId) : '',
+  };
+}
+
+function withFrozenAuthority(fields = {}) {
+  const auth = currentAuthority();
+  return {
+    ...fields,
+    userId: auth.userId,
+    treeId: auth.treeId,
+  };
+}
+
+function authorityMatches(op) {
+  if (!op || !state.token) return false;
+  if (!op.userId || !op.treeId) return false;
+  if (!state.userId || !state.treeId) return false;
+  return sameId(op.userId, state.userId) && sameId(op.treeId, state.treeId);
+}
+
+function userFacingOpError(message) {
+  const text = String(message || '').trim();
+  if (!text) return '结果还不确定，请按发出请求时的原谱号核对后再试。';
+  if (/failed to fetch|networkerror|load failed|simulated|typeerror/i.test(text)) {
+    return '网络异常，结果还不确定。请按发出请求时的原谱号核对后再试。';
+  }
+  return text;
+}
+
+function invalidateSheetOpForAuthChange(reason = 'identity_changed') {
+  if (!state.sheetOp) {
+    hideConfirmLayer();
+    return;
+  }
+  // Never continue writes or success reconciliation under a different account/tree.
+  state.sheetOp = { ...state.sheetOp, phase: 'unknown', invalidated: true, invalidateReason: reason };
+  hideConfirmLayer();
+  showError(el.sheetError, '登录身份已变更，刚才未完成的删除/纠错不能继续当作成功，也不会自动重试。');
+}
+
 function authHeaders() {
   return {
     Accept: 'application/json',
@@ -495,6 +538,9 @@ async function login() {
     if (!res.ok) throw new Error('账号或密码不对，请再试一次。');
     return res.json();
   });
+
+  // Auth change must invalidate any in-flight delete/correction before new tree loads.
+  invalidateSheetOpForAuthChange('login');
 
   state.token = data.token;
   localStorage.setItem(TOKEN_KEY, state.token);
@@ -970,25 +1016,48 @@ function relationsFromEdges(personId) {
   const nodesById = new Map((state.tree?.nodes || []).map((n) => [String(n.id), n]));
   const parentSlots = { father: null, mother: null };
   const live = findPerson(personId);
+  // Prefer authoritative person-list slots when available (including explicit null mother/father).
+  const liveHasParentFields = Boolean(live && ('father_id' in live || 'mother_id' in live));
   if (live?.father_id != null) {
     parentSlots.father = findPerson(live.father_id) || nodesById.get(String(live.father_id)) || null;
   }
   if (live?.mother_id != null) {
     parentSlots.mother = findPerson(live.mother_id) || nodesById.get(String(live.mother_id)) || null;
   }
-  // Fallback from edges when person list lacks slots (tree-only nodes).
-  if (!parentSlots.father || !parentSlots.mother) {
+  // Edge fallback only for tree-only nodes (no person-list parent fields).
+  // Never copy an already-assigned parent into the other slot (would show「父母是共父、共父」).
+  if (!liveHasParentFields && (!parentSlots.father || !parentSlots.mother)) {
     for (const edge of edges) {
       if (edge.type !== 'parent' || !sameId(edge.to, personId)) continue;
       const parent = nodesById.get(String(edge.from));
       if (!parent) continue;
-      if (!parentSlots.father && parent.gender === 'male') parentSlots.father = parent;
-      else if (!parentSlots.mother && parent.gender === 'female') parentSlots.mother = parent;
-      else if (!parentSlots.father) parentSlots.father = parent;
-      else if (!parentSlots.mother) parentSlots.mother = parent;
+      if (parentSlots.father && sameId(parentSlots.father.id, parent.id)) continue;
+      if (parentSlots.mother && sameId(parentSlots.mother.id, parent.id)) continue;
+      if (!parentSlots.father && parent.gender === 'male') {
+        parentSlots.father = parent;
+        continue;
+      }
+      if (!parentSlots.mother && parent.gender === 'female') {
+        parentSlots.mother = parent;
+        continue;
+      }
+      if (!parentSlots.father && parent.gender !== 'female') {
+        parentSlots.father = parent;
+        continue;
+      }
+      if (!parentSlots.mother && parent.gender !== 'male') {
+        parentSlots.mother = parent;
+      }
     }
   }
-  const parents = [parentSlots.father, parentSlots.mother].filter(Boolean);
+  const parents = [];
+  if (parentSlots.father) parents.push(parentSlots.father);
+  if (
+    parentSlots.mother
+    && (!parentSlots.father || !sameId(parentSlots.mother.id, parentSlots.father.id))
+  ) {
+    parents.push(parentSlots.mother);
+  }
   const children = edges
     .filter((e) => e.type === 'parent' && sameId(e.from, personId))
     .map((e) => nodesById.get(String(e.to)))
@@ -1056,6 +1125,7 @@ function hideConfirmLayer() {
   el.sheetConfirm.classList.add('hidden');
   el.sheetConfirm.hidden = true;
   el.sheetConfirm.removeAttribute('aria-busy');
+  el.sheet?.classList.remove('confirm-open');
   showError(el.sheetConfirmError, '');
   if (el.sheetDetail) el.sheetDetail.classList.remove('hidden');
   state.sheetOp = emptySheetOp();
@@ -1111,9 +1181,16 @@ function openConfirmLayer({ title, bodyHtml, actions }) {
   showError(el.sheetConfirmError, '');
   renderConfirmActions(actions);
   el.sheetDetail.classList.add('hidden');
+  el.sheet.classList.add('confirm-open');
   el.sheetConfirm.classList.remove('hidden');
   el.sheetConfirm.hidden = false;
   el.sheet.classList.remove('hidden');
+  el.sheet.scrollTop = 0;
+  el.sheetConfirm.scrollTop = 0;
+  // Narrow column layouts park the sheet below the canvas — bring the dialog into the viewport.
+  try {
+    el.sheet.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  } catch (_) { /* ignore */ }
   const focusable = el.sheetConfirm.querySelector('button:not([disabled]), [href], input, select, textarea');
   (focusable || el.sheetConfirm).focus?.();
 }
@@ -1224,7 +1301,7 @@ function beginClearParent(subject, slot, counterpart) {
   const title = isFather ? '更正父亲记录' : '更正母亲记录';
   const slotWord = isFather ? '父亲栏' : '母亲栏';
   const confirmLabel = isFather ? '从父亲栏去掉' : '从母亲栏去掉';
-  state.sheetOp = {
+  state.sheetOp = withFrozenAuthority({
     op: isFather ? 'clear_father' : 'clear_mother',
     personId: subject.id,
     name: subject.name,
@@ -1232,7 +1309,7 @@ function beginClearParent(subject, slot, counterpart) {
     counterpartId: counterpart.id,
     counterpartName: counterpart.name,
     phase: 'confirm',
-  };
+  });
   openConfirmLayer({
     title,
     bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel(subject))}</p>`
@@ -1250,7 +1327,7 @@ function beginClearParent(subject, slot, counterpart) {
 }
 
 function beginUnlinkSpouse(subject, spouse) {
-  state.sheetOp = {
+  state.sheetOp = withFrozenAuthority({
     op: 'unlink_spouse',
     personId: subject.id,
     name: subject.name,
@@ -1258,7 +1335,7 @@ function beginUnlinkSpouse(subject, spouse) {
     counterpartName: spouse.name,
     linkId: spouse.link_id,
     phase: 'confirm',
-  };
+  });
   openConfirmLayer({
     title: '解除家谱中的夫妻关系记录',
     bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel(subject))} 与 ${escapeHtml(personLabel(spouse))}</p>`
@@ -1276,7 +1353,7 @@ function beginUnlinkSpouse(subject, spouse) {
 }
 
 function beginUnlinkSibling(subject, sibling) {
-  state.sheetOp = {
+  state.sheetOp = withFrozenAuthority({
     op: 'unlink_sibling',
     personId: subject.id,
     name: subject.name,
@@ -1284,7 +1361,7 @@ function beginUnlinkSibling(subject, sibling) {
     counterpartName: sibling.name,
     linkId: sibling.link_id,
     phase: 'confirm',
-  };
+  });
   openConfirmLayer({
     title: '移除手动添加的兄弟姐妹关系记录',
     bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel(subject))} 与 ${escapeHtml(personLabel(sibling))}</p>`
@@ -1303,12 +1380,12 @@ function beginUnlinkSibling(subject, sibling) {
 
 function beginDeletePerson(subject, trigger) {
   state.confirmTrigger = trigger || el.deletePerson;
-  state.sheetOp = {
+  state.sheetOp = withFrozenAuthority({
     op: 'delete_person',
     personId: subject.id,
     name: subject.name,
     phase: 'confirm',
-  };
+  });
   openConfirmLayer({
     title: `删除『${subject.name}』？`,
     bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel(subject))}</p>`
@@ -1330,33 +1407,44 @@ function cancelConfirm() {
   hideConfirmLayer();
   const subject = findPerson(subjectId) || findPerson(state.selectedId);
   if (subject) openSheet(subject);
-  else focusAfterConfirmClose();
+  // Always restore focus to the trigger (or a live node / 添加) after cancel/Esc.
+  focusAfterConfirmClose();
 }
 
-async function reconcilePersonExists(personId) {
-  if (!state.token || personId == null) {
+async function reconcilePersonExists(op) {
+  const personId = op?.personId;
+  if (!op || personId == null) {
     return { status: 'unknown', reason: 'no_authority' };
+  }
+  if (!authorityMatches(op)) {
+    return { status: 'unknown', reason: 'identity_changed' };
   }
   try {
     await api(`/persons/${personId}`);
     return { status: 'exists' };
   } catch (err) {
     const code = Number(err?.status || 0);
+    if (code === 401 || code === 403) {
+      return { status: 'unknown', reason: 'auth' };
+    }
     if (code === 404) {
-      // Ambiguous single 404 is not proof by itself; confirm via scoped list.
+      // Ambiguous single 404 is not proof. Re-check list only under frozen account+tree.
+      if (!authorityMatches(op)) {
+        return { status: 'unknown', reason: 'identity_changed' };
+      }
       try {
         await loadPersons();
+        if (!authorityMatches(op)) {
+          return { status: 'unknown', reason: 'identity_changed' };
+        }
         const still = state.persons.some((p) => sameId(p.id, personId));
-        if (!still && state.treeId && state.userId) {
+        if (!still) {
           return { status: 'absent_confirmed' };
         }
         return { status: 'unknown', reason: 'ambiguous_404' };
       } catch (_) {
         return { status: 'unknown', reason: 'list_failed' };
       }
-    }
-    if (code === 401 || code === 403) {
-      return { status: 'unknown', reason: 'auth' };
     }
     if (err?.uncertain) {
       return { status: 'unknown', reason: 'uncertain' };
@@ -1367,6 +1455,9 @@ async function reconcilePersonExists(personId) {
 
 async function reconcileRelationship(op) {
   if (!op) return { status: 'unknown' };
+  if (!authorityMatches(op)) {
+    return { status: 'unknown', reason: 'identity_changed' };
+  }
   if (op.op === 'clear_father' || op.op === 'clear_mother') {
     try {
       const person = await api(`/persons/${op.personId}`);
@@ -1374,7 +1465,9 @@ async function reconcileRelationship(op) {
       const cleared = person[slot] == null || person[slot] === '';
       return { status: cleared ? 'applied' : 'pending', person };
     } catch (err) {
-      if (Number(err?.status) === 404) return { status: 'unknown', reason: 'person_missing' };
+      const code = Number(err?.status || 0);
+      if (code === 401 || code === 403) return { status: 'unknown', reason: 'auth' };
+      if (code === 404) return { status: 'unknown', reason: 'ambiguous_404' };
       return { status: 'unknown', reason: err?.uncertain ? 'uncertain' : 'error' };
     }
   }
@@ -1386,21 +1479,24 @@ async function reconcileRelationship(op) {
       const still = rows.some((row) => sameId(row.id, op.linkId));
       return { status: still ? 'pending' : 'applied' };
     } catch (err) {
+      const code = Number(err?.status || 0);
+      if (code === 401 || code === 403) return { status: 'unknown', reason: 'auth' };
       return { status: 'unknown', reason: err?.uncertain ? 'uncertain' : 'error' };
     }
   }
   if (op.op === 'delete_person') {
-    return reconcilePersonExists(op.personId);
+    return reconcilePersonExists(op);
   }
   return { status: 'unknown' };
 }
 
 function showUnknownResult(op, detailMessage) {
   state.sheetOp = { ...op, phase: 'unknown' };
+  const safeDetail = userFacingOpError(detailMessage);
   openConfirmLayer({
     title: '结果还不确定',
-    bodyHtml: `<p>还没有把这次操作当作已经成功。正在按发出请求时的原谱号 ${escapeHtml(String(op.personId))} 核对「${escapeHtml(op.name)}」。请稍候，不要重复点击。</p>`
-      + (detailMessage ? `<p>${escapeHtml(detailMessage)}</p>` : ''),
+    bodyHtml: `<p>还没有把这次操作当作已经成功。请按发出请求时的原谱号 ${escapeHtml(String(op.personId))} 核对「${escapeHtml(op.name)}」。不要对其他人重试。</p>`
+      + (safeDetail ? `<p>${escapeHtml(safeDetail)}</p>` : ''),
     actions: [
       {
         label: '先核对原谱号',
@@ -1417,37 +1513,41 @@ function showDeleteBlocked409(op, body) {
   state.sheetOp = { ...op, phase: 'rejected' };
   const children = Array.isArray(body?.children) ? body.children : [];
   const listHtml = children.length
-    ? `<div class="child-correct-list">${children.map((c) => (
-      `<button type="button" class="ghost" data-open-child="${escapeHtml(String(c.id))}">`
-      + `${escapeHtml(c.name)}（谱号 ${escapeHtml(String(c.id))}）· 打开并更正记录</button>`
-    )).join('')}</div>`
+    ? `<ul class="child-correct-list">${children.map((c) => (
+      `<li>${escapeHtml(c.name)}（谱号 ${escapeHtml(String(c.id))}）</li>`
+    )).join('')}</ul>`
     : '<p>请到相关子女详情中清空误认的父或母栏后，再对原谱号重试。</p>';
+  const actions = [];
+  // Prefer opening related children for correction; never suggest deleting children.
+  // Retry-delete stays ghost/secondary — correction is the emphatic path.
+  for (const child of children) {
+    actions.push({
+      label: `打开并更正：${child.name}（谱号 ${child.id}）`,
+      className: 'outline-action',
+      primary: actions.length === 0,
+      onClick: () => {
+        const live = findPerson(child.id);
+        hideConfirmLayer();
+        if (live) openSheet(live);
+      },
+    });
+  }
+  actions.push({ label: '关闭', className: 'ghost', cancel: true, onClick: () => cancelConfirm() });
+  actions.push({
+    label: '仍针对原谱号重试删除',
+    className: 'ghost',
+    onClick: () => {
+      const frozen = state.sheetOp;
+      if (!frozen || !sameId(frozen.personId, op.personId) || !authorityMatches(frozen)) return;
+      beginDeletePerson({ id: frozen.personId, name: frozen.name }, state.confirmTrigger);
+    },
+  });
   openConfirmLayer({
     title: `还不能删除『${op.name}』`,
     bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel({ name: op.name, id: op.personId }))}</p>`
       + '<p>还有成员将这位记为父亲或母亲，若关系记错请更正对应成员记录，无需删除这些成员。还有子女记在 TA 名下，所以不能删人。</p>'
       + listHtml,
-    actions: [
-      { label: '关闭', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
-      {
-        label: '仍针对原谱号重试删除',
-        className: 'danger-solid',
-        primary: true,
-        onClick: () => {
-          const frozen = state.sheetOp;
-          if (!frozen || !sameId(frozen.personId, op.personId)) return;
-          beginDeletePerson({ id: frozen.personId, name: frozen.name }, state.confirmTrigger);
-        },
-      },
-    ],
-  });
-  el.sheetConfirmBody.querySelectorAll('[data-open-child]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const childId = btn.getAttribute('data-open-child');
-      const child = findPerson(childId);
-      hideConfirmLayer();
-      if (child) openSheet(child);
-    });
+    actions,
   });
 }
 
@@ -1534,6 +1634,10 @@ async function afterSuccessfulCorrection(op) {
 async function reconcileAndContinue() {
   const op = state.sheetOp;
   if (!op) return;
+  if (!authorityMatches(op)) {
+    showUnknownResult(op, '当前登录账户或家谱已变更，不能把这次结果当作已删除，也不会改打其他人。');
+    return;
+  }
   setConfirmBusy(true);
   try {
     const result = await reconcileRelationship(op);
@@ -1544,7 +1648,6 @@ async function reconcileAndContinue() {
       }
       if (result.status === 'exists') {
         state.sheetOp = { ...op, phase: 'confirm' };
-        showError(el.sheetConfirmError, `核对后，谱号 ${op.personId} 仍在家谱中。若要再次操作，仍针对这一谱号。`);
         openConfirmLayer({
           title: '结果还不确定',
           bodyHtml: `<p>核对后，谱号 ${escapeHtml(String(op.personId))} 仍在家谱中。若要再次操作，仍针对这一谱号。</p>`,
@@ -1560,7 +1663,12 @@ async function reconcileAndContinue() {
         });
         return;
       }
-      showUnknownResult(op, '认证失败、权限不足或单次含义不明的结果，不能当作已删除。');
+      const reason = result.reason === 'identity_changed'
+        ? '当前登录账户或家谱已变更，不能把缺席当作已删除。'
+        : result.reason === 'auth'
+          ? '认证或权限失败，不能当作已删除。'
+          : '认证失败、权限不足或单次含义不明的结果，不能当作已删除。';
+      showUnknownResult(op, reason);
       return;
     }
     if (result.status === 'applied') {
@@ -1572,7 +1680,9 @@ async function reconcileAndContinue() {
       setConfirmBusy(false);
       return;
     }
-    showUnknownResult(op, '还不能确认关系是否已更正。');
+    showUnknownResult(op, result.reason === 'identity_changed'
+      ? '当前登录账户或家谱已变更，不能确认关系已更正。'
+      : '还不能确认关系是否已更正。');
   } finally {
     setConfirmBusy(false);
   }
@@ -1581,8 +1691,20 @@ async function reconcileAndContinue() {
 async function submitSheetOp() {
   const op = state.sheetOp;
   if (!op || op.phase === 'submitting') return;
-  // Freeze snapshot at send time.
-  const frozen = { ...op, phase: 'submitting' };
+  if (!authorityMatches(op)) {
+    showUnknownResult(op, '当前登录账户或家谱已变更，不会发出针对其他人的写入。');
+    return;
+  }
+  // Freeze person/link/slot and original account/tree at send time.
+  const frozen = withFrozenAuthority({
+    ...op,
+    userId: op.userId,
+    treeId: op.treeId,
+    phase: 'submitting',
+  });
+  // Keep the initiating authority even if currentAuthority drifted mid-dialog.
+  frozen.userId = op.userId;
+  frozen.treeId = op.treeId;
   state.sheetOp = frozen;
   setConfirmBusy(true);
   showError(el.sheetConfirmError, '');
@@ -1618,7 +1740,7 @@ async function submitSheetOp() {
     }
     if (isDefiniteClientRejection(err) && Number(err?.status) !== 404) {
       state.sheetOp = { ...frozen, phase: 'rejected' };
-      showError(el.sheetConfirmError, err.message || '没有保存成功，请再试一次。');
+      showError(el.sheetConfirmError, userFacingOpError(err.message || '没有保存成功，请再试一次。'));
       setConfirmBusy(false);
       el.sheetConfirm.querySelectorAll('button').forEach((btn) => {
         btn.disabled = false;
@@ -1627,7 +1749,7 @@ async function submitSheetOp() {
       return;
     }
     // Network / timeout / parse / ambiguous 404 → unknown; do not claim success.
-    showUnknownResult(frozen, err?.message || '');
+    showUnknownResult(frozen, userFacingOpError(err?.message || ''));
     return;
   } finally {
     setConfirmBusy(false);
@@ -1672,7 +1794,10 @@ function openSheet(node) {
   const siblingLine = siblings.length ? `兄弟姐妹有${namesOf(siblings)}。` : '兄弟姐妹还没有记下。';
   const spouseLine = rel.spouses.length ? `配偶是${namesOf(rel.spouses)}。` : '配偶还没有记下。';
   const childLine = rel.children.length ? `子女有${namesOf(rel.children)}。` : '子女还没有记下。';
-  el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>`;
+  const inferredSiblingNote = siblings.some((s) => s.source === 'inferred' || s.source === 'both')
+    ? '<p class="inferred-sibling-note">因共同父母仍显示为兄弟姐妹。</p>'
+    : '';
+  el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>${inferredSiblingNote}`;
   el.setRoot.dataset.personId = String(node.id);
   renderCorrectionList(node);
   if (el.deleteSection) el.deleteSection.classList.remove('hidden');

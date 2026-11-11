@@ -215,6 +215,7 @@ async function installDeleteHooks() {
     window.__yimaiLoseNextDelete = false;
     window.__yimaiFailNextDeleteNetwork = false;
     window.__yimaiDeletePaths = [];
+    window.__yimaiDeleteCommitted = [];
     window.fetch = async (input, init = {}) => {
       const url = String(input);
       const method = (init.method || 'GET').toUpperCase();
@@ -226,7 +227,8 @@ async function installDeleteHooks() {
         }
         if (window.__yimaiLoseNextDelete) {
           window.__yimaiLoseNextDelete = false;
-          await window.__yimaiOrigFetch(input, init);
+          const res = await window.__yimaiOrigFetch(input, init);
+          window.__yimaiDeleteCommitted.push({ url, status: res.status });
           throw new TypeError('Failed to fetch (simulated lost delete response)');
         }
       }
@@ -353,7 +355,12 @@ async function testDel3Child409AndCorrectThenDelete() {
   const blocked = still.some((p) => String(p.id) === String(auth.idP))
     && ui.confirmBody.includes('无需删除这些成员')
     && ui.confirmBody.includes(`谱号 ${auth.idC}`);
-  await page.click(`#sheet-confirm-body button[data-open-child="${auth.idC}"]`);
+  await page.evaluate((childId) => {
+    const btn = Array.from(document.querySelectorAll('#sheet-confirm-actions button'))
+      .find((b) => b.textContent.includes(`谱号 ${childId}`) && b.textContent.includes('打开并更正'));
+    if (!btn) throw new Error('missing open-child action');
+    btn.click();
+  }, auth.idC);
   await sleep(400);
   ui = await sheetText();
   const openedChild = ui.title.includes('子C') && ui.puhao.includes(String(auth.idC));
@@ -584,14 +591,28 @@ async function testDel7FailuresAndFrozenRetry() {
     if (btn) btn.click();
     else document.querySelector('#sheet-confirm-actions button.danger-solid')?.click();
   });
-  await sleep(1000);
+  await page.waitForFunction(() => (document.getElementById('sheet-confirm-title')?.textContent || '').includes('不确定'), { timeout: 8000 });
+  // Terminal proof: after committed-but-lost DELETE, click 核对 under same account/tree.
+  await page.evaluate(() => {
+    Array.from(document.querySelectorAll('#sheet-confirm-actions button'))
+      .find((b) => b.textContent.includes('核对'))
+      ?.click();
+  });
+  await sleep(1200);
+  const uiAfterReconcile = await sheetText();
   const paths = await page.evaluate(() => window.__yimaiDeletePaths || []);
+  const committed = await page.evaluate(() => window.__yimaiDeleteCommitted || []);
   const onlyA = paths.length > 0 && paths.every((p) => p.includes(`/persons/${auth.idA}`));
   const persons = await personsApi();
+  const aGone = !persons.some((p) => String(p.id) === String(auth.idA));
   const bSafe = persons.some((p) => String(p.id) === String(auth.idB));
+  const terminalOk = aGone && bSafe && uiAfterReconcile.confirmHidden
+    && committed.some((c) => c.url.includes(`/persons/${auth.idA}`) && Number(c.status) === 204);
   await screenshot('del7-after-lost-response.png');
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del7-paths.json'), JSON.stringify({ paths, persons, ui }, null, 2));
-  log('DEL-7/DEL-H-20..24 unknown/network keeps frozen id; no mis-delete', networkOk && onlyA && bSafe && frozenText && stillA, `paths=${paths.join('|')}`);
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del7-paths.json'), JSON.stringify({
+    paths, committed, persons, uiBeforeRetry: ui, uiAfterReconcile, originalId: auth.idA, account_id: auth.userId, tree_id: auth.treeId,
+  }, null, 2));
+  log('DEL-7/DEL-H-20..24 unknown/network keeps frozen id; lost DELETE reconciles absent', networkOk && onlyA && bSafe && frozenText && stillA && terminalOk, `paths=${paths.join('|')} aGone=${aGone}`);
 }
 
 async function testIsolationForeign404() {
@@ -660,13 +681,31 @@ async function runAll() {
   console.log(`BASE_URL=${BASE_URL}`);
   console.log(`ARTIFACTS_DIR=${ARTIFACTS_DIR}`);
   fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
-  const hashes = {
-    head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: APP_ROOT, encoding: 'utf8' }).stdout.trim(),
-    appJs: fileSha('frontend/js/app.js'),
-    appCss: fileSha('frontend/css/app.css'),
-    personController: fileSha('app/Http/Controllers/Api/V1/PersonController.php'),
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: APP_ROOT, encoding: 'utf8' }).stdout.trim();
+  const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: APP_ROOT, encoding: 'utf8' }).stdout.trim();
+  const sourceHashes = {
+    'frontend/js/app.js': fileSha('frontend/js/app.js'),
+    'frontend/css/app.css': fileSha('frontend/css/app.css'),
+    'app/Http/Controllers/Api/V1/PersonController.php': fileSha('app/Http/Controllers/Api/V1/PersonController.php'),
   };
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'source-hashes.json'), JSON.stringify(hashes, null, 2));
+  const servedHashes = {
+    appJs: createHash('sha256').update(Buffer.from(await (await fetch(`${BASE_URL}/app/js/app.js`)).arrayBuffer())).digest('hex'),
+    appCss: createHash('sha256').update(Buffer.from(await (await fetch(`${BASE_URL}/app/css/app.css`)).arrayBuffer())).digest('hex'),
+  };
+  const provenance = {
+    head,
+    dirty: Boolean(dirty),
+    startedAt: startedAt.toISOString(),
+    sourceHashes,
+    servedHashes,
+    servedMatchesSource: {
+      js: servedHashes.appJs === sourceHashes['frontend/js/app.js'],
+      css: servedHashes.appCss === sourceHashes['frontend/css/app.css'],
+    },
+  };
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'suite-start-provenance.json'), JSON.stringify(provenance, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'source-hashes.json'), JSON.stringify({ head, ...sourceHashes }, null, 2));
+  console.log(JSON.stringify({ event: 'suite_start', head, servedMatchesSource: provenance.servedMatchesSource }, null, 2));
 
   const ordered = [
     testDel1SameNameIdVisibleAndExactDelete,
@@ -695,29 +734,36 @@ async function runAll() {
     await teardown().catch(() => {});
   }
 
-  // pad/count: we expect exactly EXPECTED_TEST_COUNT log lines from tests above + optional suite error
   const passed = results.filter((r) => r.passed).length;
   const total = results.length;
   const endedAt = new Date();
+  const endHashes = {
+    'frontend/js/app.js': fileSha('frontend/js/app.js'),
+    'frontend/css/app.css': fileSha('frontend/css/app.css'),
+    'app/Http/Controllers/Api/V1/PersonController.php': fileSha('app/Http/Controllers/Api/V1/PersonController.php'),
+  };
   const payload = {
     passed,
     total,
-    expected: EXPECTED_TEST_COUNT,
-    countOk: total === EXPECTED_TEST_COUNT || total === EXPECTED_TEST_COUNT + 1,
+    expected: 11,
+    countOk: total >= 11 && total <= 12,
     allPassed: passed === total && !fatalError,
     fatalError: fatalError ? String(fatalError.message || fatalError) : null,
     results,
-    hashes,
+    head,
+    sourceHashesStart: sourceHashes,
+    sourceHashesEnd: endHashes,
+    sourceStable: JSON.stringify(sourceHashes) === JSON.stringify(endHashes),
+    servedHashes,
+    servedMatchesSource: provenance.servedMatchesSource,
+    dirtyAtStart: Boolean(dirty),
     startedAt: startedAt.toISOString(),
     endedAt: endedAt.toISOString(),
   };
-  // Adjust expected to actual planned named tests (11) — keep honest.
-  payload.expected = 11;
-  payload.countOk = total >= 11;
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'delete-correction-results.json'), JSON.stringify(payload, null, 2));
-  console.log(`Results: ${passed}/${total}`);
+  console.log(`Results: ${passed}/${total} head=${head}`);
   console.log(`Evidence: ${ARTIFACTS_DIR}`);
-  if (!payload.allPassed) process.exit(1);
+  if (!payload.allPassed || !payload.sourceStable || !payload.servedMatchesSource.js) process.exit(1);
   process.exit(0);
 }
 

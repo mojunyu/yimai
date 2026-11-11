@@ -1,9 +1,9 @@
 # Paper / ink / cinnabar visual polish — Design (APPROVED 15:49 Asia/Shanghai)
 
-> **Status:** APPROVED by user 2026-11-11 15:49 Asia/Shanghai for Cursor Auto only.  
+> **Status:** APPROVED by user 2026-11-11 **15:49 Asia/Shanghai** for Cursor Auto only.  
 > **Same workstream/PR** as delete-correction (`cursor/delete-correction-02b3` from `ba353c1`).  
 > **Sequence:** finish/verify DEL behavior first, then apply this visual layer, then combined regression.  
-> **Source:** uploaded `yimai-visual-spec-2026-11-11` (approved; responsive clauses now in scope).  
+> **Source document history:** uploaded `yimai-visual-spec-2026-11-11` originally labeled itself a design proposal with responsive clauses “待批准”. **User approval at 15:49 Asia/Shanghai lifted that hold** for the same Auto workstream. Proposed token/contrast *calculations* in that paper are not themselves implementation proof; implemented surfaces must be re-measured on the final HEAD.  
 > **Do not:** rewrite business copy, change data flows/navigation product, merge/deploy, touch demo18, use non-Auto models.
 
 ## Intent
