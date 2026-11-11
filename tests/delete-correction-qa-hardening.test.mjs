@@ -1021,6 +1021,7 @@ async function testTrueBrowserZoomObstacle() {
 }
 
 async function test409PrefersChildCorrection() {
+  await page.setViewport({ width: 1280, height: 800 });
   const auth = phpSeed(`
 $u=App\\Models\\User::create(['name'=>'QA409','email'=>$email,'password'=>bcrypt('password')]);
 $t=App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'QA409']);
@@ -1030,7 +1031,11 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
 `);
   await openAuthed(auth, auth.idP);
   await selectById(auth.idP);
-  await page.click('#btn-delete-person');
+  await page.evaluate(() => {
+    document.getElementById('delete-section')?.scrollIntoView({ block: 'center' });
+    document.getElementById('btn-delete-person')?.click();
+  });
+  await page.waitForFunction(() => !document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
   await clickConfirmPrimary();
   await page.waitForFunction(() => (document.getElementById('sheet-confirm-body')?.textContent || '').includes('父亲或母亲'), { timeout: 8000 });
   const order = await page.evaluate(() => Array.from(document.querySelectorAll('#sheet-confirm-actions button')).map((b) => b.textContent.trim()));
