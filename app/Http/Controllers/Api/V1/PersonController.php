@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Person;
+use App\Models\SiblingLink;
 use App\Models\SpouseLink;
 use App\Support\EnsuresCurrentTree;
 use Illuminate\Http\JsonResponse;
@@ -16,14 +17,16 @@ use Illuminate\Validation\ValidationException;
  * AC-1: person CRUD.
  * AC-2: father_id/mother_id binding + cycle hard-fail + parent edges on tree JSON.
  * AC-3: spouse edges on tree JSON (type=spouse with a,b,link_id).
+ * SIB (2026-11-11): sibling edges on tree JSON (type=sibling with a,b,link_id).
  *
- * Tree JSON (locked field names for AC-4):
+ * Tree JSON (locked field names for AC-4; sibling added 2026-11-11):
  * {
  *   "root_id": <id>,
  *   "nodes": [{ "id","name","gender","generation","birth_year","death_year" }],
  *   "edges": [
  *     { "type":"parent", "from": <parent_id>, "to": <child_id> },
- *     { "type":"spouse", "a": <id>, "b": <id>, "link_id": <id> }
+ *     { "type":"spouse", "a": <id>, "b": <id>, "link_id": <id> },
+ *     { "type":"sibling", "a": <id>, "b": <id>, "link_id": <id> }
  *   ]
  * }
  */
@@ -205,6 +208,20 @@ class PersonController extends Controller
         foreach ($spouseLinks as $link) {
             $edges[] = [
                 'type' => 'spouse',
+                'a' => $link->person_a_id,
+                'b' => $link->person_b_id,
+                'link_id' => $link->id,
+            ];
+        }
+
+        $siblingLinks = SiblingLink::query()
+            ->where('tree_id', $root->tree_id)
+            ->orderBy('id')
+            ->get();
+
+        foreach ($siblingLinks as $link) {
+            $edges[] = [
+                'type' => 'sibling',
                 'a' => $link->person_a_id,
                 'b' => $link->person_b_id,
                 'link_id' => $link->id,

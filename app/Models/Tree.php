@@ -27,4 +27,9 @@ class Tree extends Model
     {
         return $this->hasMany(SpouseLink::class);
     }
+
+    public function siblingLinks(): HasMany
+    {
+        return $this->hasMany(SiblingLink::class);
+    }
 }

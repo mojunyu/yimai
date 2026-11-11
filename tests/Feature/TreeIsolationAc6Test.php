@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Person;
+use App\Models\SiblingLink;
 use App\Models\SpouseLink;
 use App\Models\Tree;
 use App\Models\User;
@@ -34,6 +35,12 @@ class TreeIsolationAc6Test extends TestCase
         ])->assertUnauthorized();
         $this->patchJson('/api/v1/spouse-links/1', ['note' => 'n'])->assertUnauthorized();
         $this->deleteJson('/api/v1/spouse-links/1')->assertUnauthorized();
+        $this->getJson('/api/v1/sibling-links')->assertUnauthorized();
+        $this->postJson('/api/v1/sibling-links', [
+            'person_a_id' => 1,
+            'person_b_id' => 2,
+        ])->assertUnauthorized();
+        $this->deleteJson('/api/v1/sibling-links/1')->assertUnauthorized();
     }
 
     public function test_second_user_cannot_read_or_write_other_tree_persons(): void
@@ -118,6 +125,51 @@ class TreeIsolationAc6Test extends TestCase
         $this->assertDatabaseHas('spouse_links', [
             'id' => $link->id,
             'note' => 'secret',
+            'tree_id' => $ownerTreeId,
+        ]);
+    }
+
+    public function test_second_user_cannot_read_or_write_other_tree_sibling_links(): void
+    {
+        [$owner, $intruder, $ownerPerson] = $this->twoUsersWithPerson();
+
+        $ownerTreeId = $ownerPerson->tree_id;
+        $sib = Person::query()->create([
+            'tree_id' => $ownerTreeId,
+            'name' => '兄弟姐妹',
+            'gender' => 'female',
+            'generation' => 1,
+        ]);
+        $aId = min($ownerPerson->id, $sib->id);
+        $bId = max($ownerPerson->id, $sib->id);
+        $link = SiblingLink::query()->create([
+            'tree_id' => $ownerTreeId,
+            'person_a_id' => $aId,
+            'person_b_id' => $bId,
+        ]);
+
+        Sanctum::actingAs($intruder);
+
+        $this->getJson('/api/v1/sibling-links')
+            ->assertOk()
+            ->assertJsonPath('data', []);
+
+        $this->deleteJson('/api/v1/sibling-links/'.$link->id)
+            ->assertNotFound();
+
+        $intruderPerson = $this->postJson('/api/v1/persons', [
+            'name' => '入侵者成员',
+            'gender' => 'male',
+            'generation' => 1,
+        ])->assertCreated()->json();
+
+        $this->postJson('/api/v1/sibling-links', [
+            'person_a_id' => $intruderPerson['id'],
+            'person_b_id' => $ownerPerson->id,
+        ])->assertStatus(422);
+
+        $this->assertDatabaseHas('sibling_links', [
+            'id' => $link->id,
             'tree_id' => $ownerTreeId,
         ]);
     }
