@@ -879,7 +879,8 @@ async function testReconcileInFlightThenLoginB(mode) {
   await page.$eval('#email', (el, v) => { el.value = v; }, b.email);
   await page.$eval('#password', (el) => { el.value = 'password'; });
   await page.click('#btn-login');
-  await sleep(1000);
+  await page.waitForFunction((id) => localStorage.getItem('yimai_user_id') === String(id), { timeout: 15000 }, String(b.userId));
+  await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 15000 });
   const afterLogin = await sheetText();
   await page.evaluate(() => window.__yimaiReleaseDelayedPersonGet?.());
   await sleep(900);
@@ -890,7 +891,8 @@ async function testReconcileInFlightThenLoginB(mode) {
   const bStable = JSON.stringify(bBefore.data.map((p) => p.id).sort()) === JSON.stringify(bAfter.data.map((p) => p.id).sort());
   const noAConfirm = afterRelease.confirmHidden
     && !(afterRelease.confirmBody || '').includes(String(a.idP))
-    && !(afterRelease.confirmTitle || '').includes('甲树人');
+    && !(afterRelease.confirmTitle || '').includes('甲树人')
+    && !(afterRelease.confirmBody || '').includes('甲树人');
   const aStillPresent = aAfter.data.some((p) => String(p.id) === String(a.idP));
   await screenshot(`del7-reconcile-inflight-${mode}-after-login-b.png`);
   fs.writeFileSync(path.join(ARTIFACTS_DIR, `del7-reconcile-inflight-${mode}.json`), JSON.stringify({

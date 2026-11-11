@@ -1200,6 +1200,11 @@ function hideConfirmLayer() {
   el.sheetConfirm.removeAttribute('aria-busy');
   el.sheet?.classList.remove('confirm-open');
   showError(el.sheetConfirmError, '');
+  // Scrub painted confirm copy so a later account cannot inherit foreign 谱号/name
+  // from a hidden dialog (identity-boundary residual).
+  if (el.sheetConfirmTitle) el.sheetConfirmTitle.textContent = '';
+  if (el.sheetConfirmBody) el.sheetConfirmBody.innerHTML = '';
+  if (el.sheetConfirmActions) el.sheetConfirmActions.innerHTML = '';
   if (el.sheetDetail) el.sheetDetail.classList.remove('hidden');
   state.sheetOp = emptySheetOp();
 }
