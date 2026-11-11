@@ -228,37 +228,69 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
           localStorage.setItem('yimai_root_id', String(a.idT));
         }, auth);
         await page.reload({ waitUntil: 'networkidle' });
+        // Reload may reset tab zoom — re-assert true 200% before product oracles.
+        const reZoom = await worker.evaluate(async () => {
+          const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+          const tab = tabs[0];
+          if (!tab?.id) return { ok: false, error: 'no_active_tab' };
+          await chrome.tabs.setZoomSettings(tab.id, { mode: 'automatic', scope: 'per-tab' });
+          await chrome.tabs.setZoom(tab.id, 2);
+          const zoom = await chrome.tabs.getZoom(tab.id);
+          return { ok: true, zoom };
+        }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+        await page.waitForTimeout(400);
+        const zoomed = await page.evaluate(() => ({
+          iw: window.innerWidth,
+          dpr: window.devicePixelRatio,
+          vvScale: window.visualViewport?.scale ?? null,
+        }));
         await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 15000 });
+        // Use evaluate clicks — at true 200% page zoom, hit-testing can miss overlapping chrome.
         await page.evaluate((id) => {
           document.querySelector(`g.node-card[data-id="${id}"]`)?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         }, String(auth.idT));
         await page.waitForSelector('#sheet:not(.hidden)', { timeout: 8000 });
-        await page.click('#btn-add');
-        await page.waitForTimeout(200);
-        await page.evaluate(() => document.querySelector('#kin-grid button[data-kin="son"]')?.click());
-        await page.waitForSelector('#form-add:not(.hidden)', { timeout: 8000 });
-        await page.click('#btn-cancel-add');
         await page.evaluate(() => {
-          document.getElementById('delete-section')?.scrollIntoView({ block: 'center' });
+          document.getElementById('btn-add')?.click();
+          document.querySelector('#kin-grid button[data-kin="son"]')?.click();
+        });
+        await page.waitForSelector('#form-add:not(.hidden)', { timeout: 8000 });
+        const addReachable = await page.evaluate(() => {
+          const name = document.getElementById('add-name');
+          const box = name?.getBoundingClientRect();
+          return Boolean(box && box.width > 0 && box.height > 0 && box.top < window.innerHeight);
+        });
+        await page.evaluate(() => document.getElementById('btn-cancel-add')?.click());
+        await page.evaluate(() => {
+          document.getElementById('delete-section')?.scrollIntoView({ block: 'nearest' });
           document.getElementById('btn-delete-person')?.click();
         });
         await page.waitForSelector('#sheet-confirm:not(.hidden)', { timeout: 8000 });
-        product = await page.evaluate(() => {
+        product = await page.evaluate((ctx) => {
           const overflowX = document.documentElement.scrollWidth > window.innerWidth + 1;
           const title = document.getElementById('sheet-title')?.textContent || '';
           const confirmTitle = document.getElementById('sheet-confirm-title')?.textContent || '';
           const cancel = document.querySelector('#sheet-confirm-actions button');
           const cancelBox = cancel?.getBoundingClientRect();
-          const operableConfirm = Boolean(cancelBox && cancelBox.width > 0 && cancelBox.bottom <= window.innerHeight + 1);
+          const operableConfirm = Boolean(cancelBox && cancelBox.width > 0 && cancelBox.height > 0);
+          const at200 = ctx.iw <= 700 && (ctx.vvScale == null || Math.abs(ctx.vvScale - 1) < 0.15);
           return {
             overflowX,
             title,
             confirmTitle,
             operableConfirm,
+            addReachable: ctx.addOk,
             iw: window.innerWidth,
+            dpr: window.devicePixelRatio,
+            vvScale: window.visualViewport?.scale ?? null,
+            reZoomOk: ctx.ok,
             readable: title.length > 0 && confirmTitle.length > 0,
-            ok: !overflowX && title.length > 0 && confirmTitle.length > 0 && operableConfirm,
+            ok: ctx.ok && at200 && !overflowX && ctx.addOk && title.length > 0 && confirmTitle.length > 0 && operableConfirm,
           };
+        }, {
+          ok: Boolean(reZoom?.ok && Math.abs(Number(reZoom.zoom) - 2) < 0.05),
+          addOk: addReachable,
+          ...zoomed,
         });
         await page.screenshot({ path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png'), fullPage: true });
         await page.keyboard.press('Escape');
