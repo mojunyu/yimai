@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Person;
 use App\Models\SiblingLink;
 use App\Support\EnsuresCurrentTree;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -57,23 +58,38 @@ class SiblingLinkController extends Controller
         $aId = min($rawA, $rawB);
         $bId = max($rawA, $rawB);
 
-        $existing = SiblingLink::query()
-            ->where('tree_id', $tree->id)
-            ->where('person_a_id', $aId)
-            ->where('person_b_id', $bId)
-            ->first();
-
+        $existing = $this->findPair($tree->id, $aId, $bId);
         if ($existing !== null) {
             return response()->json($this->linkPayload($existing), 200);
         }
 
-        $link = SiblingLink::query()->create([
-            'tree_id' => $tree->id,
-            'person_a_id' => $aId,
-            'person_b_id' => $bId,
-        ]);
+        try {
+            $link = SiblingLink::query()->create([
+                'tree_id' => $tree->id,
+                'person_a_id' => $aId,
+                'person_b_id' => $bId,
+            ]);
+        } catch (UniqueConstraintViolationException $e) {
+            // Concurrent AB/BA (or retry) lost the race after the empty check.
+            // Reconcile to the surviving canonical row — do not mask unrelated DB errors.
+            $existing = $this->findPair($tree->id, $aId, $bId);
+            if ($existing === null) {
+                throw $e;
+            }
+
+            return response()->json($this->linkPayload($existing), 200);
+        }
 
         return response()->json($this->linkPayload($link), 201);
+    }
+
+    private function findPair(int $treeId, int $aId, int $bId): ?SiblingLink
+    {
+        return SiblingLink::query()
+            ->where('tree_id', $treeId)
+            ->where('person_a_id', $aId)
+            ->where('person_b_id', $bId)
+            ->first();
     }
 
     public function destroy(Request $request, string $id): JsonResponse

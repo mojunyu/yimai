@@ -9,6 +9,7 @@ use App\Models\Tree;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\TestDox;
 use Tests\TestCase;
 
 /**
@@ -129,6 +130,7 @@ class TreeIsolationAc6Test extends TestCase
         ]);
     }
 
+    #[TestDox('SIB-AC6: foreign sibling list empty; delete 404; cross-bind 422; forged tree_id ignored; owner link unchanged')]
     public function test_second_user_cannot_read_or_write_other_tree_sibling_links(): void
     {
         [$owner, $intruder, $ownerPerson] = $this->twoUsersWithPerson();
@@ -150,9 +152,11 @@ class TreeIsolationAc6Test extends TestCase
 
         Sanctum::actingAs($intruder);
 
-        $this->getJson('/api/v1/sibling-links')
+        $list = $this->getJson('/api/v1/sibling-links')
             ->assertOk()
-            ->assertJsonPath('data', []);
+            ->json('data');
+        $this->assertSame([], $list);
+        $this->assertFalse(collect($list)->contains(fn ($row) => (int) $row['id'] === (int) $link->id));
 
         $this->deleteJson('/api/v1/sibling-links/'.$link->id)
             ->assertNotFound();
@@ -161,17 +165,24 @@ class TreeIsolationAc6Test extends TestCase
             'name' => '入侵者成员',
             'gender' => 'male',
             'generation' => 1,
+            'tree_id' => $ownerTreeId, // forged — must stay in intruder tree
         ])->assertCreated()->json();
+        $this->assertNotSame($ownerTreeId, $intruderPerson['tree_id']);
 
         $this->postJson('/api/v1/sibling-links', [
             'person_a_id' => $intruderPerson['id'],
             'person_b_id' => $ownerPerson->id,
+            'tree_id' => $ownerTreeId,
         ])->assertStatus(422);
 
         $this->assertDatabaseHas('sibling_links', [
             'id' => $link->id,
             'tree_id' => $ownerTreeId,
+            'person_a_id' => $aId,
+            'person_b_id' => $bId,
         ]);
+        $this->assertSame(1, SiblingLink::query()->where('tree_id', $ownerTreeId)->count());
+        $this->assertSame(0, SiblingLink::query()->where('tree_id', $intruderPerson['tree_id'])->count());
     }
 
     public function test_forged_tree_id_on_create_is_ignored_and_stays_in_own_tree(): void

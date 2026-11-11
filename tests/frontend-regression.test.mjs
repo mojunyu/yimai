@@ -27,7 +27,7 @@ const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR
   : path.resolve(APP_ROOT, 'artifacts');
 
 /** Must match results logged by the ordered suite. Aborting early fails. */
-const EXPECTED_TEST_COUNT = 36;
+const EXPECTED_TEST_COUNT = 41;
 
 let browser;
 let page;
@@ -245,6 +245,9 @@ async function installFetchHooks() {
     window.__yimaiNextPersonPost422Msg = '';
     window.__yimaiFailNextPersonGetId = null;
     window.__yimaiPostPersonCount = 0;
+    window.__yimaiPostSiblingLinkCount = 0;
+    window.__yimaiFailNextSiblingLinkPost = false;
+    window.__yimaiLoseNextSiblingLinkPostResponse = false;
     window.fetch = async (input, init = {}) => {
       const url = String(input);
       const method = (init.method || 'GET').toUpperCase();
@@ -267,6 +270,22 @@ async function installFetchHooks() {
           // Backend commits; client never receives the body (unknown outcome).
           await window.__yimaiOrigFetch(input, init);
           throw new TypeError('Failed to fetch (simulated lost create response)');
+        }
+      }
+      if (method === 'POST' && /\/api\/v1\/sibling-links\/?$/.test(url.replace(/\?.*$/, ''))) {
+        window.__yimaiPostSiblingLinkCount += 1;
+        if (window.__yimaiFailNextSiblingLinkPost) {
+          window.__yimaiFailNextSiblingLinkPost = false;
+          return new Response(
+            JSON.stringify({ message: 'forced sibling-link bind failure for regression test' }),
+            { status: 500, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (window.__yimaiLoseNextSiblingLinkPostResponse) {
+          window.__yimaiLoseNextSiblingLinkPostResponse = false;
+          // Backend commits the link; client never receives the body (uncertain outcome).
+          await window.__yimaiOrigFetch(input, init);
+          throw new TypeError('Failed to fetch (simulated lost sibling-link response)');
         }
       }
       if (
@@ -327,6 +346,14 @@ async function installFetchHooks() {
 
 async function armBindFail() {
   await page.evaluate(() => { window.__yimaiFailNextBind = true; });
+}
+
+async function armSiblingLinkFail() {
+  await page.evaluate(() => { window.__yimaiFailNextSiblingLinkPost = true; });
+}
+
+async function armLoseNextSiblingLinkPostResponse() {
+  await page.evaluate(() => { window.__yimaiLoseNextSiblingLinkPostResponse = true; });
 }
 
 async function armTreeLoadFail() {
@@ -1780,6 +1807,328 @@ async function testApiRejectsParentOverwrite() {
   );
 }
 
+async function testSiblingBindFailRecoveryAndRetrySameId() {
+  // Genuine sibling-link POST failure (not PATCH persons).
+  const auth = phpCreateUser({ withPerson: true, personName: '兄锚', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('兄锚');
+  await installFetchHooks();
+  await page.evaluate(() => {
+    window.__yimaiPostPersonCount = 0;
+    window.__yimaiPostSiblingLinkCount = 0;
+  });
+  const before = await personCountViaApi();
+  await page.click('button[data-kin="younger_brother"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '半成弟弟');
+  await armSiblingLinkFail();
+  await submitAddForm();
+  await page.waitForSelector('#add-error:not(.hidden)', { timeout: 10000 });
+  await sleep(400);
+  const err = await page.$eval('#add-error', (el) => el.textContent);
+  const sheetErr = await page.$eval('#sheet-error', (el) => ({
+    t: el.textContent,
+    h: el.classList.contains('hidden'),
+  }));
+  const recovery = await readRecovery();
+  const afterFail = await personCountViaApi();
+  const pending = (await personsViaApi()).filter((p) => p.name === '半成弟弟');
+  const postsFail = await page.evaluate(() => ({
+    person: window.__yimaiPostPersonCount,
+    sib: window.__yimaiPostSiblingLinkCount,
+  }));
+  await screenshot('sib-recovery-bind-fail.png');
+  const shotAt = new Date().toISOString();
+
+  // F5 must keep pending id + notice.
+  await page.reload({ waitUntil: 'networkidle0' });
+  await sleep(600);
+  const recoveryAfterF5 = await readRecovery();
+  await installFetchHooks();
+  await page.evaluate(() => {
+    window.__yimaiPostPersonCount = 0;
+    window.__yimaiPostSiblingLinkCount = 0;
+  });
+  await selectNodeByName('兄锚');
+  await page.click('button[data-kin="younger_brother"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  // Explicit ID choice of the pending person (no blind new POST).
+  const selected = await page.evaluate((pendingId) => {
+    const sel = document.getElementById('add-existing');
+    if (!sel) return null;
+    const opt = Array.from(sel.options).find((o) => String(o.value) === String(pendingId));
+    if (!opt) return null;
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return opt.value;
+  }, pending[0]?.id);
+  await submitAddForm();
+  await sleep(1000);
+  const postsRetry = await page.evaluate(() => ({
+    person: window.__yimaiPostPersonCount,
+    sib: window.__yimaiPostSiblingLinkCount,
+  }));
+  const afterRetry = await personCountViaApi();
+  const same = (await personsViaApi()).filter((p) => p.name === '半成弟弟');
+  const snap = await treeSnapshot();
+  const pair = same[0]
+    ? [Number(auth.personId), Number(same[0].id)].sort((a, b) => a - b).join('-')
+    : '';
+  const edgeOk = pair && snap.siblingEdges.includes(pair);
+  const parentsNull = same[0] && same[0].father_id == null && same[0].mother_id == null;
+  const ok = afterFail === before + 1
+    && pending.length === 1
+    && (err.includes('人已记下，关系未保存') || (!sheetErr.h && sheetErr.t.includes('人已记下，关系未保存')))
+    && recovery
+    && String(recovery.pendingPersonId) === String(pending[0].id)
+    && recovery.relation === 'sibling'
+    && String(recoveryAfterF5?.pendingPersonId) === String(pending[0].id)
+    && selected
+    && postsFail.person === 1
+    && postsFail.sib === 1
+    && postsRetry.person === 0
+    && postsRetry.sib === 1
+    && afterRetry === afterFail
+    && same.length === 1
+    && String(same[0].id) === String(pending[0].id)
+    && edgeOk
+    && parentsNull;
+  log(
+    'SIB sibling-link bind fail keeps pending ID; F5+retry binds same ID only',
+    ok,
+    `shotAt=${shotAt}, pending=${pending[0]?.id}, postsP=${postsFail.person}/${postsRetry.person}, postsS=${postsFail.sib}/${postsRetry.sib}, edge=${edgeOk}`,
+  );
+
+  // Uncertain lost sibling-link response: person already exists; retry must be idempotent (no new person).
+  await selectNodeByName('兄锚');
+  await installFetchHooks();
+  await page.evaluate(() => {
+    window.__yimaiPostPersonCount = 0;
+    window.__yimaiPostSiblingLinkCount = 0;
+  });
+  await page.click('button[data-kin="elder_sister"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '丢包姐姐');
+  await armLoseNextSiblingLinkPostResponse();
+  await submitAddForm();
+  await sleep(1200);
+  const lostPosts = await page.evaluate(() => ({
+    person: window.__yimaiPostPersonCount,
+    sib: window.__yimaiPostSiblingLinkCount,
+  }));
+  const sisters = (await personsViaApi()).filter((p) => p.name === '丢包姐姐');
+  const snapLost = await treeSnapshot();
+  const sisterPair = sisters[0]
+    ? [Number(auth.personId), Number(sisters[0].id)].sort((a, b) => a - b).join('-')
+    : '';
+  // Link may already exist server-side despite lost response; reconcile via explicit ID retry.
+  await page.reload({ waitUntil: 'networkidle0' });
+  await sleep(500);
+  await installFetchHooks();
+  await page.evaluate(() => {
+    window.__yimaiPostPersonCount = 0;
+    window.__yimaiPostSiblingLinkCount = 0;
+  });
+  const recoveryLost = await readRecovery();
+  if (recoveryLost?.pendingPersonId || sisters[0]) {
+    await selectNodeByName('兄锚');
+    await page.click('button[data-kin="elder_sister"]');
+    await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+    await page.evaluate((id) => {
+      const sel = document.getElementById('add-existing');
+      if (!sel || id == null) return;
+      sel.value = String(id);
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }, recoveryLost?.pendingPersonId || sisters[0]?.id);
+    await submitAddForm();
+    await sleep(900);
+  }
+  const postsAfterLost = await page.evaluate(() => ({
+    person: window.__yimaiPostPersonCount,
+    sib: window.__yimaiPostSiblingLinkCount,
+  }));
+  const sistersAfter = (await personsViaApi()).filter((p) => p.name === '丢包姐姐');
+  const snapAfterLost = await treeSnapshot();
+  const sisterEdge = sistersAfter[0]
+    && snapAfterLost.siblingEdges.includes(
+      [Number(auth.personId), Number(sistersAfter[0].id)].sort((a, b) => a - b).join('-'),
+    );
+  const lostOk = lostPosts.person === 1
+    && lostPosts.sib === 1
+    && sisters.length === 1
+    && sistersAfter.length === 1
+    && String(sistersAfter[0].id) === String(sisters[0].id)
+    && postsAfterLost.person === 0
+    && sisterEdge;
+  await screenshot('sib-recovery-lost-sibling-link-response.png');
+  log(
+    'SIB lost sibling-link response: reconcile by ID; no extra person; idempotent edge',
+    lostOk,
+    `sisterId=${sisters[0]?.id}, postsP=${lostPosts.person}/${postsAfterLost.person}, postsS=${lostPosts.sib}/${postsAfterLost.sib}, edge=${sisterEdge}, priorPairSeen=${Boolean(sisterPair && snapLost.siblingEdges.includes(sisterPair))}`,
+  );
+}
+
+async function testExistingSiblingByConcreteIdSameName() {
+  const auth = phpCreateUser({ withPerson: true, personName: '选人锚', gender: 'male' });
+  // Seed two same-name people with different/unknown parents via API.
+  const seeded = await page.evaluate(async (a) => {
+    const headers = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${a.token}`,
+    };
+    const fatherX = await fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: '父X', gender: 'male', generation: 1 }),
+    }).then((r) => r.json());
+    const fatherY = await fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: '父Y', gender: 'male', generation: 1 }),
+    }).then((r) => r.json());
+    const sameA = await fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({
+        name: '同名丁', gender: 'male', generation: 2, father_id: fatherX.id,
+      }),
+    }).then((r) => r.json());
+    const sameB = await fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({
+        name: '同名丁', gender: 'female', generation: 2, father_id: fatherY.id,
+      }),
+    }).then((r) => r.json());
+    const unknown = await fetch('/api/v1/persons', {
+      method: 'POST', headers, body: JSON.stringify({ name: '同名丁', gender: 'unknown', generation: 1 }),
+    }).then((r) => r.json());
+    return { fatherX, fatherY, sameA, sameB, unknown };
+  }, auth);
+
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  const beforeParents = {
+    A: { f: seeded.sameA.father_id, m: seeded.sameA.mother_id },
+    B: { f: seeded.sameB.father_id, m: seeded.sameB.mother_id },
+    U: { f: seeded.unknown.father_id, m: seeded.unknown.mother_id },
+    anchor: (await personByNameViaApi('选人锚')),
+  };
+  const beforeCount = await personCountViaApi();
+  await selectNodeByName('选人锚');
+  await page.click('button[data-kin="younger_brother"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  const chosen = await page.evaluate((targetId) => {
+    const sel = document.getElementById('add-existing');
+    const opt = Array.from(sel.options).find((o) => String(o.value) === String(targetId));
+    if (!opt) return null;
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return { value: opt.value, label: opt.textContent };
+  }, seeded.sameB.id);
+  await submitAddForm();
+  await sleep(900);
+  const afterCount = await personCountViaApi();
+  const list = await personsViaApi();
+  const sameName = list.filter((p) => p.name === '同名丁');
+  const chosenNow = list.find((p) => Number(p.id) === Number(seeded.sameB.id));
+  const unchosenA = list.find((p) => Number(p.id) === Number(seeded.sameA.id));
+  const unchosenU = list.find((p) => Number(p.id) === Number(seeded.unknown.id));
+  const snap = await treeSnapshot();
+  const pair = [Number(auth.personId), Number(seeded.sameB.id)].sort((a, b) => a - b).join('-');
+  const edgeOk = snap.siblingEdges.includes(pair);
+  const noEdgeA = !snap.siblingEdges.includes(
+    [Number(auth.personId), Number(seeded.sameA.id)].sort((a, b) => a - b).join('-'),
+  );
+  const parentsUntouched = Number(chosenNow?.father_id) === Number(beforeParents.B.f)
+    && chosenNow?.mother_id == null
+    && Number(unchosenA?.father_id) === Number(beforeParents.A.f)
+    && Number(unchosenU?.father_id || 0) === Number(beforeParents.U.f || 0)
+    && beforeParents.anchor.father_id == null;
+  const ok = chosen
+    && String(chosen.value) === String(seeded.sameB.id)
+    && afterCount === beforeCount
+    && sameName.length === 3
+    && edgeOk
+    && noEdgeA
+    && parentsUntouched;
+  await screenshot('sib-existing-same-name-concrete-id.png');
+  log(
+    'SIB existing sibling by concrete ID; same-name others untouched; no parent copy',
+    ok,
+    `chosen=${chosen?.value}, edge=${edgeOk}, sameName=${sameName.length}, count ${beforeCount}->${afterCount}, parentsB=${chosenNow?.father_id}`,
+  );
+}
+
+async function testSiblingDoubleClickCreatesOnePersonAndOneLink() {
+  // UI double-click creation protection (person POST) vs link-only repeat (idempotent).
+  const auth = phpCreateUser({ withPerson: true, personName: '双击兄锚', gender: 'male' });
+  await injectAuth({ ...auth, rootId: auth.personId });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await waitForNodes(1);
+  await selectNodeByName('双击兄锚');
+  await installFetchHooks();
+  await page.evaluate(() => {
+    window.__yimaiPostPersonCount = 0;
+    window.__yimaiPostSiblingLinkCount = 0;
+  });
+  await page.click('button[data-kin="younger_sister"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.type('#add-name', '双击妹妹');
+  await Promise.all([
+    page.click('#form-add button[type="submit"]'),
+    page.click('#form-add button[type="submit"]'),
+  ]);
+  await sleep(1200);
+  const posts = await page.evaluate(() => ({
+    person: window.__yimaiPostPersonCount,
+    sib: window.__yimaiPostSiblingLinkCount,
+  }));
+  const sisters = (await personsViaApi()).filter((p) => p.name === '双击妹妹');
+  const snap = await treeSnapshot();
+  const pair = sisters[0]
+    ? [Number(auth.personId), Number(sisters[0].id)].sort((a, b) => a - b).join('-')
+    : '';
+  const edgeOk = pair && snap.siblingEdges.includes(pair);
+  const ok = sisters.length === 1 && posts.person <= 1 && edgeOk;
+  log(
+    'SIB UI double-click: one person create; sibling edge present',
+    ok,
+    `persons=${sisters.length}, postsP=${posts.person}, postsS=${posts.sib}, edge=${edgeOk}`,
+  );
+
+  // Link-only repeat (existing ID) must stay one edge / one person.
+  await selectNodeByName('双击兄锚');
+  await installFetchHooks();
+  await page.evaluate(() => {
+    window.__yimaiPostPersonCount = 0;
+    window.__yimaiPostSiblingLinkCount = 0;
+  });
+  await page.click('button[data-kin="younger_sister"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.evaluate((id) => {
+    const sel = document.getElementById('add-existing');
+    sel.value = String(id);
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }, sisters[0].id);
+  await submitAddForm();
+  await sleep(700);
+  await submitAddForm();
+  await sleep(700);
+  const posts2 = await page.evaluate(() => ({
+    person: window.__yimaiPostPersonCount,
+    sib: window.__yimaiPostSiblingLinkCount,
+  }));
+  const sisters2 = (await personsViaApi()).filter((p) => p.name === '双击妹妹');
+  const snap2 = await treeSnapshot();
+  const edgesForPair = snap2.siblingEdges.filter((e) => e === pair);
+  const ok2 = sisters2.length === 1
+    && posts2.person === 0
+    && edgesForPair.length === 1
+    && posts2.sib >= 1;
+  log(
+    'SIB link-only repeat on existing ID: still one person and one edge',
+    ok2,
+    `persons=${sisters2.length}, postsP=${posts2.person}, postsS=${posts2.sib}, edges=${edgesForPair.length}`,
+  );
+}
+
 async function testSisterHusbandAndYoungerSisterOps() {
   // Coverage gap close-out: 姐 / 夫 / 妹 within existing small flow.
   await selectNodeByName('测试儿子');
@@ -1908,6 +2257,9 @@ async function runAllTests() {
     testRelationChangesPersistAfterRefresh,
     testMissingSiblingParentError,
     testSiblingChainDoesNotInferAC,
+    testSiblingBindFailRecoveryAndRetrySameId,
+    testExistingSiblingByConcreteIdSameName,
+    testSiblingDoubleClickCreatesOnePersonAndOneLink,
     testPartialCreateBindFailure,
     testPartialRecoverySurvivesRefreshAndRetry,
     testPostSaveLoadFailureRetryStable,

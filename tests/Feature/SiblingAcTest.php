@@ -7,7 +7,9 @@ use App\Models\SiblingLink;
 use App\Models\Tree;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\TestDox;
 use Tests\TestCase;
 
 /**
@@ -17,6 +19,7 @@ class SiblingAcTest extends TestCase
 {
     use RefreshDatabase;
 
+    #[TestDox('SIB-AC1 null parents: sibling edge only, no parent edges/fields')]
     public function test_sib_ac1_null_parents_create_sibling_edge_without_parent_edges(): void
     {
         [$user, $tree, $a] = $this->seedUserWithPerson('甲', parents: false);
@@ -66,6 +69,7 @@ class SiblingAcTest extends TestCase
         $this->assertNull($b->fresh()->mother_id);
     }
 
+    #[TestDox('SIB-AC2 self-link 422; same-name half-siblings keep distinct parents')]
     public function test_sib_ac2_self_link_rejected_and_different_parents_untouched(): void
     {
         [$user, $tree, $a] = $this->seedUserWithPerson('同名甲', parents: false);
@@ -112,6 +116,7 @@ class SiblingAcTest extends TestCase
         $this->assertSame(2, Person::query()->where('tree_id', $tree->id)->where('name', '同名甲')->count());
     }
 
+    #[TestDox('SIB-AC3 AB/BA/repeat → one canonical link (serial idempotent)')]
     public function test_sib_ac3_unordered_pair_is_idempotent_and_unique(): void
     {
         [$user, $tree, $a] = $this->seedUserWithPerson('甲', parents: false);
@@ -155,6 +160,7 @@ class SiblingAcTest extends TestCase
         $this->assertCount(1, $siblingEdges);
     }
 
+    #[TestDox('SIB-AC4 PATCH parents on A does not mutate B; conflict still 422')]
     public function test_sib_ac4_adding_parents_to_a_does_not_mutate_b_or_overwrite(): void
     {
         [$user, $tree, $a] = $this->seedUserWithPerson('甲', parents: false);
@@ -212,6 +218,7 @@ class SiblingAcTest extends TestCase
         $this->assertSame($existingFatherForB->id, $b->fresh()->father_id);
     }
 
+    #[TestDox('SIB-AC5 A-B + B-C does not emit A-C sibling edge')]
     public function test_sib_ac5_chain_does_not_infer_ac_edge(): void
     {
         [$user, $tree, $a] = $this->seedUserWithPerson('A', parents: false);
@@ -271,6 +278,7 @@ class SiblingAcTest extends TestCase
         $this->assertTrue($parentEdges->contains(fn ($e) => $e['from'] === $parent->id && $e['to'] === $c->id));
     }
 
+    #[TestDox('SIB-AC7/AC5: children→409 leaves person+links; allowed delete removes incident sibling links only')]
     public function test_sib_ac7_delete_person_cleans_sibling_links_ac5_guard_unchanged(): void
     {
         [$user, $tree, $a] = $this->seedUserWithPerson('甲', parents: false);
@@ -282,6 +290,12 @@ class SiblingAcTest extends TestCase
             'gender' => 'male',
             'generation' => 1,
         ]);
+        $c = Person::query()->create([
+            'tree_id' => $tree->id,
+            'name' => '丙',
+            'gender' => 'male',
+            'generation' => 1,
+        ]);
         $child = Person::query()->create([
             'tree_id' => $tree->id,
             'name' => '甲子',
@@ -290,26 +304,38 @@ class SiblingAcTest extends TestCase
             'father_id' => $a->id,
         ]);
 
-        $link = $this->postJson('/api/v1/sibling-links', [
+        $linkAb = $this->postJson('/api/v1/sibling-links', [
             'person_a_id' => $a->id,
             'person_b_id' => $b->id,
+        ])->assertCreated()->json();
+
+        $linkBc = $this->postJson('/api/v1/sibling-links', [
+            'person_a_id' => $b->id,
+            'person_b_id' => $c->id,
         ])->assertCreated()->json();
 
         $this->deleteJson('/api/v1/persons/'.$a->id)
             ->assertStatus(409);
 
-        $this->assertDatabaseHas('sibling_links', ['id' => $link['id']]);
         $this->assertDatabaseHas('persons', ['id' => $a->id]);
+        $this->assertDatabaseHas('sibling_links', ['id' => $linkAb['id']]);
+        $this->assertDatabaseHas('sibling_links', ['id' => $linkBc['id']]);
+        $this->assertSame(2, SiblingLink::query()->where('tree_id', $tree->id)->count());
 
         $this->patchJson('/api/v1/persons/'.$child->id, ['father_id' => null])->assertOk();
 
         $this->deleteJson('/api/v1/persons/'.$a->id)->assertNoContent();
 
         $this->assertDatabaseMissing('persons', ['id' => $a->id]);
-        $this->assertDatabaseMissing('sibling_links', ['id' => $link['id']]);
+        $this->assertDatabaseMissing('sibling_links', ['id' => $linkAb['id']]);
+        // Non-incident B–C link must survive A's deletion.
+        $this->assertDatabaseHas('sibling_links', ['id' => $linkBc['id']]);
         $this->assertDatabaseHas('persons', ['id' => $b->id]);
+        $this->assertDatabaseHas('persons', ['id' => $c->id]);
+        $this->assertSame(1, SiblingLink::query()->where('tree_id', $tree->id)->count());
     }
 
+    #[TestDox('SIB cross-tree person bind rejected; forged tree_id on body ignored')]
     public function test_outsider_person_cannot_be_linked(): void
     {
         [$user, $tree, $a] = $this->seedUserWithPerson('甲', parents: false);
@@ -330,8 +356,62 @@ class SiblingAcTest extends TestCase
         $this->postJson('/api/v1/sibling-links', [
             'person_a_id' => $a->id,
             'person_b_id' => $outsider->id,
+            'tree_id' => $otherTree->id,
         ])->assertStatus(422)
             ->assertJsonValidationErrors(['person_b_id']);
+
+        $this->assertSame(0, SiblingLink::query()->count());
+    }
+
+    #[TestDox('SIB race: unique constraint after empty check returns 200 with canonical one link')]
+    public function test_unique_constraint_race_reconciles_to_existing_pair(): void
+    {
+        [$user, $tree, $a] = $this->seedUserWithPerson('甲', parents: false);
+        Sanctum::actingAs($user);
+
+        $b = Person::query()->create([
+            'tree_id' => $tree->id,
+            'name' => '乙',
+            'gender' => 'female',
+            'generation' => 1,
+        ]);
+
+        $aId = min($a->id, $b->id);
+        $bId = max($a->id, $b->id);
+
+        // Simulate lost race: another request inserts the canonical row between check and insert.
+        SiblingLink::creating(function () use ($tree, $aId, $bId) {
+            static $injected = false;
+            if ($injected) {
+                return;
+            }
+            $injected = true;
+            if (SiblingLink::query()->where('tree_id', $tree->id)->where('person_a_id', $aId)->where('person_b_id', $bId)->exists()) {
+                return;
+            }
+            DB::table('sibling_links')->insert([
+                'tree_id' => $tree->id,
+                'person_a_id' => $aId,
+                'person_b_id' => $bId,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        });
+
+        try {
+            $response = $this->postJson('/api/v1/sibling-links', [
+                'person_a_id' => $b->id,
+                'person_b_id' => $a->id,
+            ]);
+
+            $response->assertOk()
+                ->assertJsonPath('person_a_id', $aId)
+                ->assertJsonPath('person_b_id', $bId);
+
+            $this->assertSame(1, SiblingLink::query()->where('tree_id', $tree->id)->count());
+        } finally {
+            SiblingLink::flushEventListeners();
+        }
     }
 
     /**
