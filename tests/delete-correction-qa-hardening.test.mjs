@@ -931,8 +931,12 @@ async function measureChromeRestore() {
       sheetHeadVisible: Boolean(head && csHead?.display !== 'none' && (headBox?.height || 0) > 0),
       focus: {
         id: active?.id || null,
-        cls: active?.className || null,
+        // SVG nodes expose className as SVGAnimatedString — normalize to plain text.
+        cls: typeof active?.className === 'string'
+          ? active.className
+          : (active?.getAttribute?.('class') || active?.className?.baseVal || null),
         dataId: active?.getAttribute?.('data-id') || null,
+        tag: active?.tagName || null,
         live: Boolean(active && document.body.contains(active) && (active.getClientRects?.().length || 0) > 0),
       },
     };
@@ -1115,13 +1119,14 @@ async function testNarrowConfirmCancelAndSuccessRestore() {
     await sleep(250);
     const afterCancel = await measureChromeRestore();
     await screenshot(`vis-restore-cancel-${vp.name}.png`);
+    const focusCls = (f) => String(f?.cls || '');
     const cancelOk = afterCancel.confirmHidden
       && !afterCancel.confirmOpen
       && afterCancel.footerVisible
       && afterCancel.canvasHeight > 40
       && afterCancel.sheetHeadVisible
       && afterCancel.focus.live
-      && (afterCancel.focus.id === 'btn-delete-person' || afterCancel.focus.id === 'btn-add' || (afterCancel.focus.cls || '').includes('node-card'));
+      && (afterCancel.focus.id === 'btn-delete-person' || afterCancel.focus.id === 'btn-add' || focusCls(afterCancel.focus).includes('node-card'));
 
     // Success path: delete non-last person so tree/footer remain meaningful.
     await page.evaluate(() => {
@@ -1141,7 +1146,7 @@ async function testNarrowConfirmCancelAndSuccessRestore() {
       && afterSuccess.sheetHeadVisible
       && afterSuccess.focus.live
       && afterSuccess.focus.id !== 'btn-delete-person'
-      && ((afterSuccess.focus.cls || '').includes('node-card') || afterSuccess.focus.id === 'btn-add');
+      && (focusCls(afterSuccess.focus).includes('node-card') || afterSuccess.focus.id === 'btn-add');
 
     reports.push({
       vp,
