@@ -917,11 +917,23 @@ function render() {
     .style('cursor', 'pointer')
     .on('click', (event, d) => {
       event.stopPropagation();
+      // Keep frozen delete/correction confirm (DEL-7); never retarget mutation to a new selection.
+      if (state.sheetOp && el.sheetConfirm && !el.sheetConfirm.classList.contains('hidden')) {
+        state.selectedId = d.id;
+        d3.select(el.canvas).selectAll('.node-card')
+          .classed('selected', (node) => sameId(node.id, d.id))
+          .attr('aria-pressed', (node) => String(sameId(node.id, d.id)));
+        return;
+      }
       openSheet(findPerson(d.id) || d);
     })
     .on('keydown', (event, d) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
+        if (state.sheetOp && el.sheetConfirm && !el.sheetConfirm.classList.contains('hidden')) {
+          state.selectedId = d.id;
+          return;
+        }
         openSheet(findPerson(d.id) || d);
       }
     });
@@ -1793,7 +1805,12 @@ async function bindPerson(target, relation, anchor) {
 
 function setSaving(on) {
   state.saving = on;
-  if (el.submitAdd) el.submitAdd.disabled = on;
+  if (el.submitAdd) {
+    el.submitAdd.disabled = on;
+    el.submitAdd.classList.toggle('is-busy', on);
+    el.submitAdd.setAttribute('aria-busy', on ? 'true' : 'false');
+  }
+  if (el.formAdd) el.formAdd.setAttribute('aria-busy', on ? 'true' : 'false');
 }
 
 function ensureRootForPerson(personId) {
@@ -2167,7 +2184,20 @@ async function submitAdd(event) {
 }
 
 el.login.addEventListener('click', () => login().catch((e) => alert(e.message)));
-el.reload.addEventListener('click', () => loadTree().catch((e) => alert(e.message)));
+el.reload.addEventListener('click', async () => {
+  el.reload.disabled = true;
+  el.reload.classList.add('is-busy');
+  el.reload.setAttribute('aria-busy', 'true');
+  try {
+    await loadTree();
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    el.reload.classList.remove('is-busy');
+    el.reload.setAttribute('aria-busy', 'false');
+    el.reload.disabled = !state.token;
+  }
+});
 el.add.addEventListener('click', onToolbarAdd);
 el.cancelAdd.addEventListener('click', cancelAdd);
 el.closeSheet.addEventListener('click', closeSheet);
