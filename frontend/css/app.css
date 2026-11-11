@@ -118,7 +118,14 @@ input:focus, select:focus { border-color: var(--accent); }
 .auth #password { width: 125px; }
 .auth button { min-height: 34px; padding: 6px 19px; }
 
-.workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 32px; }
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 32px;
+  overflow: hidden; /* keep sheet/canvas above page-footer; sheet scrolls internally */
+}
 .workspace-head { min-height: 116px; display: flex; justify-content: space-between; align-items: center; gap: 24px; }
 .eyebrow { margin: 0 0 8px; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: 0.16em; }
 h1 { margin: 0; font-family: var(--serif); font-size: 29px; font-weight: 600; letter-spacing: 0.08em; line-height: 1.4; }
@@ -154,7 +161,19 @@ h1 { margin: 0; font-family: var(--serif); font-size: 29px; font-weight: 600; le
 .legend-sibling { border-top: 1.5px dotted var(--sibling); }
 .legend i.legend-view { width: 7px; height: 7px; background: var(--accent); border-radius: 1px; }
 .canvas-footnote { font-family: var(--serif); font-size: 11px; color: var(--muted); letter-spacing: 0.12em; white-space: nowrap; }
-.page-footer { min-height: 38px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 10px; letter-spacing: 0.1em; }
+.page-footer {
+  flex: 0 0 auto;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  position: relative;
+  z-index: 1;
+  background: var(--bg);
+}
 
 .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 28px; text-align: center; pointer-events: none; }
 .empty-book { width: 90px; height: 72px; margin-bottom: 22px; stroke: var(--control-line); stroke-width: 1; }
@@ -386,13 +405,19 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
   .canvas-footnote { display: none; }
 }
 @media (max-width: 1000px) {
-  .workspace-head { min-height: 120px; }
+  .workspace-head { min-height: 120px; flex: 0 0 auto; }
   .workspace-tools { flex-direction: column; align-items: flex-end; gap: 8px; }
-  .layout { flex-direction: column; min-height: 0; }
-  .canvas-wrap { flex: 1 1 auto; min-height: 42vh; }
-  .sheet { flex: 1 1 auto; flex-basis: auto; width: 100%; max-width: none; border-left: 0; border-top: 1px solid var(--line); padding: 22px; }
+  /* min-height:0 (not 320px) so tall sheet/add-first cannot force layout under page-footer */
+  .layout { flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  .canvas-wrap { flex: 1 1 auto; min-height: 0; max-height: 42vh; }
+  .sheet { flex: 1 1 auto; flex-basis: auto; width: 100%; max-width: none; min-height: 0; border-left: 0; border-top: 1px solid var(--line); padding: 22px; }
   .canvas-heading > span:last-child { display: none; }
   .legend { gap: 12px; flex-wrap: wrap; }
+  /* Sheet open (detail/add-first): keep canvas bounded so add form scrolls above footer */
+  .layout:has(.sheet:not(.hidden)):not(:has(.sheet.confirm-open)) .canvas-wrap {
+    flex: 0 1 28vh;
+    max-height: 32vh;
+  }
   /*
    * Confirm open: sheet owns the layout containing block.
    * Root cause of VIS-02: page-footer + residual canvas competed with the sheet,

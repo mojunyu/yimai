@@ -904,6 +904,76 @@ async function testContrastRenderedSampling() {
   log('VIS-05 rendered contrast sampling (text>=4.5; disabled exempt)', ok, measured.map((m) => `${m.name}:${m.ratio}`).join(','));
 }
 
+async function measureChromeRestore() {
+  return page.evaluate(() => {
+    const sheet = document.getElementById('sheet');
+    const confirm = document.getElementById('sheet-confirm');
+    const footer = document.querySelector('.page-footer');
+    const canvas = document.querySelector('.canvas-wrap');
+    const head = document.querySelector('.sheet-head');
+    const csFooter = footer ? getComputedStyle(footer) : null;
+    const csCanvas = canvas ? getComputedStyle(canvas) : null;
+    const csHead = head ? getComputedStyle(head) : null;
+    const footerBox = footer?.getBoundingClientRect();
+    const canvasBox = canvas?.getBoundingClientRect();
+    const headBox = head?.getBoundingClientRect();
+    const confirmOpen = sheet?.classList.contains('confirm-open');
+    const confirmHidden = confirm?.classList.contains('hidden');
+    const active = document.activeElement;
+    return {
+      confirmOpen: Boolean(confirmOpen),
+      confirmHidden: Boolean(confirmHidden),
+      footerDisplay: csFooter?.display || null,
+      footerVisible: Boolean(footer && csFooter?.display !== 'none' && (footerBox?.height || 0) > 0),
+      canvasHeight: canvasBox?.height || 0,
+      canvasCollapsed: Boolean(confirmOpen) || ((canvasBox?.height || 0) < 8 && csCanvas?.opacity === '0'),
+      sheetHeadDisplay: csHead?.display || null,
+      sheetHeadVisible: Boolean(head && csHead?.display !== 'none' && (headBox?.height || 0) > 0),
+      focus: {
+        id: active?.id || null,
+        cls: active?.className || null,
+        dataId: active?.getAttribute?.('data-id') || null,
+        live: Boolean(active && document.body.contains(active) && (active.getClientRects?.().length || 0) > 0),
+      },
+    };
+  });
+}
+
+async function measureAddNameFooterCollision() {
+  return page.evaluate(() => {
+    const input = document.getElementById('add-name');
+    const footer = document.querySelector('.page-footer');
+    const sheet = document.getElementById('sheet');
+    if (!input || !footer || !sheet) {
+      return { ok: false, reason: 'missing nodes' };
+    }
+    // Bring the name field into view within the scrolling sheet if needed.
+    input.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const ib = input.getBoundingClientRect();
+    const fb = footer.getBoundingClientRect();
+    const sb = sheet.getBoundingClientRect();
+    const overlap = !(ib.bottom <= fb.top + 0.5 || ib.top >= fb.bottom - 0.5 || ib.right <= fb.left + 0.5 || ib.left >= fb.right - 0.5);
+    const midX = (ib.left + ib.right) / 2;
+    const midY = (ib.top + ib.bottom) / 2;
+    const top = document.elementFromPoint(midX, midY);
+    const coveredByFooter = Boolean(top?.closest?.('.page-footer'));
+    const footerCs = getComputedStyle(footer);
+    return {
+      ok: !overlap && !coveredByFooter && footerCs.display !== 'none',
+      overlap,
+      coveredByFooter,
+      placeholder: input.getAttribute('placeholder') || '',
+      sheetTitle: document.getElementById('sheet-title')?.textContent || '',
+      emptyHidden: document.getElementById('empty')?.classList.contains('hidden'),
+      inputBox: { top: ib.top, bottom: ib.bottom, height: ib.height },
+      footerBox: { top: fb.top, bottom: fb.bottom, height: fb.height, display: footerCs.display },
+      sheetBox: { top: sb.top, bottom: sb.bottom, height: sb.height },
+      topTag: top?.tagName || null,
+      topId: top?.id || null,
+    };
+  });
+}
+
 async function testLoadingDisabledAndNarrowStates() {
   const auth = seedPerson('加载T');
   await openAuthed(auth, auth.idT);
@@ -944,12 +1014,43 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
   });
   await page.waitForFunction(() => !document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
   await clickConfirmPrimary();
-  await sleep(1000);
+  await page.waitForFunction(() => {
+    const title = document.getElementById('sheet-title')?.textContent || '';
+    const confirmHidden = document.getElementById('sheet-confirm')?.classList.contains('hidden');
+    return confirmHidden && title.includes('第一位');
+  }, { timeout: 10000 });
   const emptyUi = await page.evaluate(() => ({
     emptyHidden: document.getElementById('empty')?.classList.contains('hidden'),
     title: document.getElementById('sheet-title')?.textContent || '',
+    placeholder: document.getElementById('add-name')?.getAttribute('placeholder') || '',
+    formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
   }));
+  const emptyCollision = await measureAddNameFooterCollision();
   await screenshot('vis-empty-narrow-375.png');
+
+  // Add-first flow without delete: empty tree → 添加 opens first-person form above footer.
+  const emptyTree = phpSeed(`
+$u=App\\Models\\User::create(['name'=>'QAAdd1','email'=>$email,'password'=>bcrypt('password')]);
+$t=App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'QAAdd1']);
+echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t')->plainTextToken], JSON_UNESCAPED_UNICODE);
+`);
+  await page.setViewport({ width: 375, height: 844 });
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  await page.evaluate((a) => {
+    localStorage.clear();
+    localStorage.setItem('yimai_token', a.token);
+    localStorage.setItem('yimai_user_id', String(a.userId));
+    localStorage.setItem('yimai_tree_id', String(a.treeId));
+  }, emptyTree);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => !document.getElementById('empty')?.classList.contains('hidden'), { timeout: 8000 });
+  await page.click('#btn-add');
+  await page.waitForFunction(() => {
+    const title = document.getElementById('sheet-title')?.textContent || '';
+    return !document.getElementById('sheet')?.classList.contains('hidden') && title.includes('第一位');
+  }, { timeout: 8000 });
+  const addFirstCollision = await measureAddNameFooterCollision();
+  await screenshot('vis-add-first-narrow-375.png');
 
   // Narrow 409
   const parentChild = phpSeed(`
@@ -972,9 +1073,476 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
   await screenshot('vis-409-narrow-375.png');
   const order = await page.evaluate(() => Array.from(document.querySelectorAll('#sheet-confirm-actions button')).map((b) => b.textContent.trim()));
 
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-loading-empty-409.json'), JSON.stringify({ busy, emptyUi, order }, null, 2));
-  const ok = busy.ariaBusy === 'true' && busy.allDisabled && emptyUi.emptyHidden === false && order[0]?.includes('打开并更正');
-  log('VIS-04/06/07/08 loading busy + narrow empty + narrow 409', ok, JSON.stringify({ busy, emptyUi, order }));
+  const payload = { busy, emptyUi, emptyCollision, addFirstCollision, order };
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-loading-empty-409.json'), JSON.stringify(payload, null, 2));
+  const ok = busy.ariaBusy === 'true'
+    && busy.allDisabled
+    && emptyUi.emptyHidden === false
+    && emptyUi.placeholder.includes('张素芬')
+    && emptyCollision.ok
+    && addFirstCollision.ok
+    && order[0]?.includes('打开并更正');
+  log('VIS-04/06/07/08 loading busy + narrow empty/add-first footer + narrow 409', ok, JSON.stringify({
+    busy,
+    emptyUi,
+    emptyOk: emptyCollision.ok,
+    addFirstOk: addFirstCollision.ok,
+    order,
+  }));
+}
+
+async function testNarrowConfirmCancelAndSuccessRestore() {
+  const reports = [];
+  for (const vp of [{ w: 320, h: 700, name: '320' }, { w: 375, h: 844, name: '375' }]) {
+    await page.setViewport({ width: vp.w, height: vp.h });
+    const auth = seedPerson(`恢${vp.name}`);
+    await openAuthed(auth, auth.idT);
+    await selectById(auth.idT);
+    await page.evaluate(() => {
+      document.getElementById('delete-section')?.scrollIntoView({ block: 'center' });
+      document.getElementById('btn-delete-person')?.focus();
+      document.getElementById('btn-delete-person')?.click();
+    });
+    await page.waitForFunction(() => !document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
+    const openChrome = await measureChromeRestore();
+    await screenshot(`vis-restore-open-${vp.name}.png`);
+    await page.evaluate(() => {
+      const cancel = document.querySelector('#sheet-confirm-actions button[data-confirm-cancel="1"], #sheet-confirm-actions button.ghost');
+      if (!cancel) throw new Error('no cancel');
+      cancel.click();
+    });
+    await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
+    await sleep(250);
+    const afterCancel = await measureChromeRestore();
+    await screenshot(`vis-restore-cancel-${vp.name}.png`);
+    const cancelOk = afterCancel.confirmHidden
+      && !afterCancel.confirmOpen
+      && afterCancel.footerVisible
+      && afterCancel.canvasHeight > 40
+      && afterCancel.sheetHeadVisible
+      && afterCancel.focus.live
+      && (afterCancel.focus.id === 'btn-delete-person' || afterCancel.focus.id === 'btn-add' || (afterCancel.focus.cls || '').includes('node-card'));
+
+    // Success path: delete non-last person so tree/footer remain meaningful.
+    await page.evaluate(() => {
+      document.getElementById('delete-section')?.scrollIntoView({ block: 'center' });
+      document.getElementById('btn-delete-person')?.click();
+    });
+    await page.waitForFunction(() => !document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
+    await clickConfirmPrimary();
+    await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 10000 });
+    await sleep(400);
+    const afterSuccess = await measureChromeRestore();
+    await screenshot(`vis-restore-success-${vp.name}.png`);
+    const successOk = afterSuccess.confirmHidden
+      && !afterSuccess.confirmOpen
+      && afterSuccess.footerVisible
+      && afterSuccess.canvasHeight > 40
+      && afterSuccess.sheetHeadVisible
+      && afterSuccess.focus.live
+      && afterSuccess.focus.id !== 'btn-delete-person'
+      && ((afterSuccess.focus.cls || '').includes('node-card') || afterSuccess.focus.id === 'btn-add');
+
+    reports.push({
+      vp,
+      openChrome,
+      afterCancel,
+      afterSuccess,
+      cancelOk,
+      successOk,
+      openLooksModal: openChrome.confirmOpen && !openChrome.footerVisible && openChrome.canvasHeight < 8 && !openChrome.sheetHeadVisible,
+    });
+  }
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-narrow-confirm-restore.json'), JSON.stringify({ reports }, null, 2));
+  const ok = reports.every((r) => r.cancelOk && r.successOk && r.openLooksModal);
+  log('VIS-02/03 narrow 320/375 cancel+success restore tree/footer/head+focus', ok, JSON.stringify(reports.map((r) => ({
+    w: r.vp.w,
+    cancelOk: r.cancelOk,
+    successOk: r.successOk,
+    openLooksModal: r.openLooksModal,
+    cancelFocus: r.afterCancel.focus,
+    successFocus: r.afterSuccess.focus,
+  }))));
+}
+
+async function testStateGalleryAndFocusRings() {
+  await page.setViewport({ width: 1280, height: 800 });
+  const auth = seedPerson('态廊T');
+  await openAuthed(auth, auth.idT);
+  await selectById(auth.idT);
+
+  const gallery = [];
+  const shotState = async (name, setup) => {
+    if (setup) await setup();
+    await sleep(80);
+    const styles = await page.evaluate(() => {
+      const pick = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const cs = getComputedStyle(el);
+        return {
+          sel,
+          bg: cs.backgroundColor,
+          color: cs.color,
+          border: cs.borderColor,
+          outline: cs.outline,
+          outlineWidth: cs.outlineWidth,
+          boxShadow: cs.boxShadow,
+          disabled: el.disabled || false,
+          ariaBusy: el.closest('[aria-busy]')?.getAttribute('aria-busy') || null,
+          text: (el.textContent || '').trim().slice(0, 40),
+        };
+      };
+      return {
+        add: pick('#btn-add'),
+        login: pick('#btn-login'),
+        ghost: pick('#btn-reload'),
+        danger: pick('#btn-delete-person'),
+        input: pick('#add-name'),
+      };
+    });
+    await screenshot(`vis-state-${name}.png`);
+    gallery.push({ name, styles });
+  };
+
+  await shotState('default');
+  await shotState('hover-add', async () => { await page.hover('#btn-add'); });
+  await shotState('hover-ghost', async () => { await page.hover('#btn-reload'); });
+  await shotState('hover-danger', async () => {
+    await page.evaluate(() => document.getElementById('delete-section')?.scrollIntoView({ block: 'center' }));
+    await page.hover('#btn-delete-person');
+  });
+  await shotState('focus-add', async () => {
+    await page.evaluate(() => document.getElementById('btn-add')?.focus());
+    await page.keyboard.press('Tab');
+    await page.keyboard.down('Shift');
+    await page.keyboard.press('Tab');
+    await page.keyboard.up('Shift');
+  });
+  await shotState('pressed-add', async () => {
+    const box = await page.$eval('#btn-add', (el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.mouse.move(box.x, box.y);
+    await page.mouse.down();
+  });
+  await page.mouse.up();
+  await shotState('disabled-add', async () => {
+    await page.evaluate(() => {
+      const b = document.getElementById('btn-add');
+      if (b) b.disabled = true;
+    });
+  });
+  await page.evaluate(() => {
+    const b = document.getElementById('btn-add');
+    if (b) b.disabled = false;
+  });
+
+  // Loading/error states on confirm (representative busy+error).
+  await installHooks();
+  await page.evaluate(() => {
+    window.__yimaiDelayNextDeleteMs = 120;
+    window.__yimaiDelayNextDeleteMode = 'ok';
+  });
+  await page.click('#btn-delete-person');
+  await clickConfirmPrimary();
+  await page.waitForFunction(() => document.getElementById('sheet-confirm')?.getAttribute('aria-busy') === 'true', { timeout: 8000 });
+  await shotState('loading-confirm');
+  await page.evaluate(() => window.__yimaiReleaseDelayedDelete?.());
+  await sleep(900);
+
+  // Error: unknown network delete
+  await selectById(auth.idN);
+  await page.evaluate(() => { window.__yimaiFailNextDeleteNetwork = true; });
+  await page.click('#btn-delete-person');
+  await clickConfirmPrimary();
+  await page.waitForFunction(() => {
+    const t = document.getElementById('sheet-confirm-error')?.textContent || '';
+    const e = document.getElementById('sheet-error')?.textContent || '';
+    return t.length > 0 || e.length > 0 || !document.getElementById('sheet-confirm')?.classList.contains('hidden');
+  }, { timeout: 8000 });
+  await sleep(300);
+  await shotState('error-confirm');
+  const errorText = await page.evaluate(() => ({
+    confirmError: document.getElementById('sheet-confirm-error')?.textContent || '',
+    sheetError: document.getElementById('sheet-error')?.textContent || '',
+    confirmBody: document.getElementById('sheet-confirm-body')?.textContent || '',
+    claimsSuccess: ((document.getElementById('sheet-confirm-error')?.textContent || '')
+      + (document.getElementById('sheet-error')?.textContent || '')).includes('已删除'),
+  }));
+  await page.keyboard.press('Escape');
+  await sleep(200);
+
+  // Focus-ring gallery: keyboard modality so :focus-visible applies (not mouse focus).
+  const focusRing = [];
+  async function keyboardFocus(sel) {
+    await page.evaluate((s) => {
+      const el = document.querySelector(s);
+      if (!el) throw new Error(`missing ${s}`);
+      el.scrollIntoView({ block: 'center' });
+      // Seed focus, then Tab away/back with real key events for :focus-visible.
+      el.focus();
+    }, sel);
+    await page.keyboard.press('Tab');
+    await page.keyboard.down('Shift');
+    await page.keyboard.press('Tab');
+    await page.keyboard.up('Shift');
+    // If Tab moved away from target (disabled neighbors), re-focus then one more Tab cycle from body via keyboard only.
+    const landed = await page.evaluate((s) => document.activeElement === document.querySelector(s), sel);
+    if (!landed) {
+      await page.evaluate((s) => document.querySelector(s)?.focus(), sel);
+      await page.keyboard.press('ArrowDown');
+      await page.evaluate((s) => document.querySelector(s)?.focus(), sel);
+    }
+    return page.evaluate((s) => {
+      const el = document.querySelector(s);
+      if (!el) return { sel: s, ok: false };
+      const cs = getComputedStyle(el);
+      const focusVisible = typeof el.matches === 'function' ? el.matches(':focus-visible') : false;
+      const outlineOn = cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth || '0') >= 2;
+      return {
+        sel: s,
+        active: document.activeElement === el,
+        focusVisible,
+        outline: cs.outline,
+        outlineWidth: cs.outlineWidth,
+        outlineColor: cs.outlineColor,
+        ok: document.activeElement === el && (focusVisible || outlineOn),
+      };
+    }, sel);
+  }
+
+  await selectById(auth.idN);
+  for (const sel of ['#btn-add', '#btn-reload', '#btn-delete-person', '#btn-set-root']) {
+    const ring = await keyboardFocus(sel);
+    await screenshot(`vis-focus-ring-${sel.replace('#', '')}.png`);
+    focusRing.push(ring);
+  }
+
+  await page.click('#btn-delete-person');
+  await page.waitForSelector('#sheet-confirm:not(.hidden)');
+  // Confirm opens onto first action; Tab to cancel (ghost) and assert ring.
+  await page.keyboard.press('Tab');
+  const confirmRing = await page.evaluate(() => {
+    const el = document.activeElement;
+    const cs = getComputedStyle(el);
+    const focusVisible = typeof el.matches === 'function' ? el.matches(':focus-visible') : false;
+    const outlineOn = cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth || '0') >= 2;
+    return {
+      sel: '#sheet-confirm-actions :focus',
+      id: el?.id || null,
+      text: (el?.textContent || '').trim(),
+      focusVisible,
+      outline: cs.outline,
+      outlineWidth: cs.outlineWidth,
+      ok: Boolean(el?.closest?.('#sheet-confirm-actions')) && (focusVisible || outlineOn),
+    };
+  });
+  await screenshot('vis-focus-ring-confirm-cancel.png');
+  focusRing.push(confirmRing);
+  await page.keyboard.press('Escape');
+  await sleep(200);
+
+  await selectById(auth.idN);
+  await page.evaluate(() => document.querySelector('#kin-grid button[data-kin="son"]')?.click());
+  await page.waitForSelector('#form-add:not(.hidden)');
+  const inputRing = await keyboardFocus('#add-name');
+  // Inputs also get accent border on :focus (spec).
+  const inputBorder = await page.evaluate(() => {
+    const el = document.getElementById('add-name');
+    const cs = getComputedStyle(el);
+    return { borderTopColor: cs.borderTopColor, outline: cs.outline, outlineWidth: cs.outlineWidth };
+  });
+  inputRing.border = inputBorder;
+  inputRing.ok = inputRing.ok
+    || (inputRing.active && (
+      String(inputBorder.borderTopColor).includes('161')
+      || String(inputBorder.borderTopColor).includes('a13')
+      || (parseFloat(inputBorder.outlineWidth || '0') >= 2)
+    ));
+  await screenshot('vis-focus-ring-add-name.png');
+  focusRing.push(inputRing);
+
+  const stateOk = gallery.some((g) => g.name === 'default')
+    && gallery.some((g) => g.name === 'hover-add')
+    && gallery.some((g) => g.name === 'pressed-add')
+    && gallery.some((g) => g.name === 'disabled-add' && g.styles.add?.disabled)
+    && gallery.some((g) => g.name === 'loading-confirm')
+    && gallery.some((g) => g.name === 'error-confirm')
+    && !errorText.claimsSuccess;
+  const ringOk = focusRing.filter((r) => r.sel !== '#add-name').every((r) => r.ok) && inputRing.ok;
+
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-state-gallery.json'), JSON.stringify({ gallery, errorText }, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-focus-ring-gallery.json'), JSON.stringify({ focusRing }, null, 2));
+  log('VIS-04/16 state gallery default/hover/focus/pressed/disabled/loading/error', stateOk, `states=${gallery.map((g) => g.name).join(',')}`);
+  log('VIS-09 focus-ring gallery + keyboard oracles', ringOk, JSON.stringify(focusRing.map((r) => ({ sel: r.sel, ok: r.ok }))));
+}
+
+async function testGlobalStructureContract() {
+  await page.setViewport({ width: 1280, height: 800 });
+  const auth = phpSeed(`
+$u=App\\Models\\User::create(['name'=>'QAContract','email'=>$email,'password'=>bcrypt('password')]);
+$t=App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'QAContract']);
+$p=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'根R','gender'=>'male','generation'=>1]);
+$c=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'子S','gender'=>'female','generation'=>2,'father_id'=>$p->id]);
+echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t')->plainTextToken,'idR'=>$p->id,'idS'=>$c->id], JSON_UNESCAPED_UNICODE);
+`);
+
+  // LOGIN surface (logged-out)
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: 'networkidle0' });
+  const login = await page.evaluate(() => ({
+    brand: document.querySelector('.brand')?.textContent?.trim() || '',
+    emailLabel: document.querySelector('label[for="email"], .auth-field')?.textContent?.includes('账号') || false,
+    hasLogin: Boolean(document.getElementById('btn-login')),
+    loginLabel: document.getElementById('btn-login')?.textContent?.trim() || '',
+    emptyHint: document.getElementById('empty-hint')?.textContent?.trim() || '',
+  }));
+  await screenshot('vis-contract-login.png');
+
+  // TREE + stats after auth
+  await openAuthed(auth, auth.idR);
+  const before = await page.evaluate(() => {
+    const ids = Array.from(document.querySelectorAll('g.node-card')).map((n) => n.getAttribute('data-id')).sort();
+    const edges = Array.from(document.querySelectorAll('#tree-canvas path.edge, #tree-canvas line.edge, #tree-canvas .link')).length
+      || Array.from(document.querySelectorAll('#tree-canvas path, #tree-canvas line')).filter((el) => el.classList.contains('edge-parent') || el.classList.contains('edge-spouse') || el.classList.contains('edge-sibling') || (el.getAttribute('class') || '').includes('edge')).length;
+    const stats = document.querySelector('.stats')?.textContent?.replace(/\s+/g, ' ').trim() || '';
+    const rootMark = Array.from(document.querySelectorAll('g.node-card')).some((n) => (n.textContent || '').includes('当前视角'));
+    return {
+      ids,
+      nodeCount: ids.length,
+      edgeMarks: edges,
+      rootId: localStorage.getItem('yimai_root_id'),
+      stats,
+      rootMark,
+      legend: document.querySelector('.legend')?.textContent?.replace(/\s+/g, ' ').trim() || '',
+      reloadLabel: document.getElementById('btn-reload')?.textContent?.trim() || '',
+      addLabel: document.getElementById('btn-add')?.textContent?.trim() || '',
+    };
+  });
+  const beforeApi = await treeApi(auth.idR, auth.token);
+  await screenshot('vis-contract-tree.png');
+
+  // DETAIL
+  await selectById(auth.idR);
+  const detail = await page.evaluate(() => ({
+    title: document.getElementById('sheet-title')?.textContent || '',
+    puhao: document.getElementById('sheet-puhao')?.textContent || '',
+    summary: document.getElementById('sheet-summary')?.textContent || '',
+    deleteLabel: document.getElementById('btn-delete-person')?.textContent?.trim() || '',
+    setRootLabel: document.getElementById('btn-set-root')?.textContent?.trim() || '',
+    correctHeading: document.querySelector('#correct-section .form-heading')?.textContent?.trim() || '',
+  }));
+  await screenshot('vis-contract-detail.png');
+
+  // ADD
+  await page.evaluate(() => document.querySelector('#kin-grid button[data-kin="daughter"]')?.click());
+  await page.waitForSelector('#form-add:not(.hidden)');
+  const add = await page.evaluate(() => ({
+    title: document.getElementById('sheet-title')?.textContent || '',
+    context: document.getElementById('add-context')?.textContent || '',
+    nameLabel: document.querySelector('label.add-name-emphasis')?.textContent || '',
+    placeholder: document.getElementById('add-name')?.getAttribute('placeholder') || '',
+    submit: document.getElementById('btn-submit-add')?.textContent?.trim() || '',
+    cancel: document.getElementById('btn-cancel-add')?.textContent?.trim() || '',
+  }));
+  await screenshot('vis-contract-add.png');
+  await page.click('#btn-cancel-add');
+
+  // RECOVERY: durable bind_failed notice on existing flows (no new page).
+  await page.evaluate((payload) => {
+    localStorage.setItem('yimai_add_recovery', JSON.stringify({
+      userId: String(payload.userId),
+      treeId: String(payload.treeId),
+      pendingPersonId: payload.idS,
+      kin: 'daughter',
+      relation: 'child',
+      anchorId: Number(payload.idR),
+      parentRole: 'father',
+      name: '子S',
+      phase: 'bind_failed',
+      message: '人已记下，关系未保存：contract recovery probe',
+    }));
+  }, auth);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 10000 });
+  await selectById(auth.idR);
+  await page.evaluate(() => document.querySelector('#kin-grid button[data-kin="son"]')?.click());
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 8000 });
+  await sleep(200);
+  const recovery = await page.evaluate(() => ({
+    raw: localStorage.getItem('yimai_add_recovery'),
+    sheetError: document.getElementById('sheet-error')?.textContent || '',
+    addError: document.getElementById('add-error')?.textContent || '',
+    formVisible: !document.getElementById('form-add')?.classList.contains('hidden'),
+  }));
+  await screenshot('vis-contract-recovery.png');
+  await page.click('#btn-cancel-add');
+  // Clear recovery so subsequent DEL before/after is not blocked by durable notice.
+  await page.evaluate(() => localStorage.removeItem('yimai_add_recovery'));
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 10000 });
+
+  // BEFORE/AFTER delete (new DEL allowed): remove child, compare IDs/edges/root/stats
+  await selectById(auth.idS);
+  await page.click('#btn-delete-person');
+  await clickConfirmPrimary();
+  await page.waitForFunction((goneId) => !document.querySelector(`g.node-card[data-id="${goneId}"]`), { timeout: 10000 }, String(auth.idS));
+  await sleep(400);
+  const after = await page.evaluate(() => {
+    const ids = Array.from(document.querySelectorAll('g.node-card')).map((n) => n.getAttribute('data-id')).sort();
+    const stats = document.querySelector('.stats')?.textContent?.replace(/\s+/g, ' ').trim() || '';
+    return {
+      ids,
+      nodeCount: ids.length,
+      rootId: localStorage.getItem('yimai_root_id'),
+      stats,
+    };
+  });
+  const afterApi = await treeApi(auth.idR, auth.token);
+  await screenshot('vis-contract-after-delete.png');
+
+  const copyLocks = {
+    brand: login.brand.includes('一脉'),
+    login: login.loginLabel === '登录',
+    reload: before.reloadLabel.includes('重新载入'),
+    add: before.addLabel.includes('添加'),
+    legend: before.legend.includes('父母与子女') && before.legend.includes('夫妻') && before.legend.includes('兄弟姐妹'),
+    delete: detail.deleteLabel === '删除此人记录',
+    submit: add.submit === '记下',
+    cancel: add.cancel === '先不添了',
+    placeholder: add.placeholder.includes('张素芬'),
+    puhao: detail.puhao.includes('谱号'),
+    recoveryNotice: (recovery.sheetError + recovery.addError).includes('人已记下，关系未保存') && recovery.formVisible,
+  };
+  const structureOk = before.nodeCount === 2
+    && before.ids.includes(String(auth.idR))
+    && before.ids.includes(String(auth.idS))
+    && before.rootId === String(auth.idR)
+    && after.nodeCount === 1
+    && after.ids.includes(String(auth.idR))
+    && !after.ids.includes(String(auth.idS))
+    && after.rootId === String(auth.idR)
+    && Object.values(copyLocks).every(Boolean);
+
+  const pack = {
+    note: 'Global structure/content/requests contract on final HEAD vs approved locked copy + before/after DEL identity. New DEL surfaces allowed; old login/tree/detail/add/recovery copy preserved.',
+    approvedBaseRef: 'ba353c1 + visual polish locked copy',
+    login,
+    before,
+    beforeApiPersons: (beforeApi?.data?.nodes || beforeApi?.nodes || []).map((n) => n.id || n.person_id).filter(Boolean),
+    detail,
+    add,
+    recovery,
+    after,
+    afterApiPersons: (afterApi?.data?.nodes || afterApi?.nodes || []).map((n) => n.id || n.person_id).filter(Boolean),
+    copyLocks,
+    structureOk,
+  };
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-global-contract.json'), JSON.stringify(pack, null, 2));
+  log('VIS-13 global structure/content contract login/tree/detail/add/recovery + DEL before/after', structureOk, JSON.stringify({ copyLocks, beforeIds: before.ids, afterIds: after.ids, root: after.rootId }));
 }
 
 async function testTrueBrowserZoomObstacle() {
@@ -1086,10 +1654,13 @@ async function runAll() {
     testWriteSuccessRefreshFailNoRepeatMutation,
     testUnrelatedRecoveryPreserved,
     testNarrowScrollReachability,
+    testNarrowConfirmCancelAndSuccessRestore,
     testConfirmTabCycleAndEscFocus,
     testFocusAfterDeletedTrigger,
     testContrastRenderedSampling,
     testLoadingDisabledAndNarrowStates,
+    testStateGalleryAndFocusRings,
+    testGlobalStructureContract,
     test409PrefersChildCorrection,
     testTrueBrowserZoomObstacle,
   ];
@@ -1111,26 +1682,43 @@ async function runAll() {
     'frontend/css/app.css': fileSha('frontend/css/app.css'),
     'app/Http/Controllers/Api/V1/PersonController.php': fileSha('app/Http/Controllers/Api/V1/PersonController.php'),
   };
+  const hardeningPassed = Object.fromEntries(results.map((r) => [r.test, r.passed]));
+  const vis02 = hardeningPassed['VIS-02 footer/body non-occlusion 320/375/768 (geom+elementFromPoint)']
+    && hardeningPassed['VIS-02/03 narrow 320/375 cancel+success restore tree/footer/head+focus'];
+  const vis03 = hardeningPassed['VIS-03/15 full Tab forward+reverse cycle + Esc restores live trigger']
+    && hardeningPassed['VIS-03/15 focus after deleted trigger lands on live node/add']
+    && hardeningPassed['VIS-02/03 narrow 320/375 cancel+success restore tree/footer/head+focus'];
+  const vis04_16 = hardeningPassed['VIS-04/16 state gallery default/hover/focus/pressed/disabled/loading/error'];
+  const vis05 = hardeningPassed['VIS-05 rendered contrast sampling (text>=4.5; disabled exempt)'];
+  const vis06_08 = hardeningPassed['VIS-04/06/07/08 loading busy + narrow empty/add-first footer + narrow 409'];
+  const vis09 = hardeningPassed['VIS-09 focus-ring gallery + keyboard oracles'];
+  const vis13 = hardeningPassed['VIS-13 global structure/content contract login/tree/detail/add/recovery + DEL before/after'];
   const visMap = {
-    note: 'Honest coverage on this HEAD. PASS only with full oracle. PARTIAL = some evidence, not whole matrix row. UNVERIFIED = missing/blocked. Never pad total PASS while required rows remain UNVERIFIED.',
+    note: 'Honest coverage on this HEAD. PASS only with full oracle. PARTIAL = some evidence, not whole matrix row. UNVERIFIED = missing/blocked. Never pad total PASS while required rows remain UNVERIFIED. VIS-14 remains environmental UNVERIFIED (true browser zoom).',
     head,
+    scripts: {
+      hardening: 'node tests/delete-correction-qa-hardening.test.mjs',
+      delete: 'node tests/delete-correction.test.mjs',
+      regression: 'node tests/frontend-regression.test.mjs',
+      phpunit: 'php artisan test --compact',
+    },
     rows: [
       { id: 'VIS-01', strength: 'PASS', oracle: 'desktop confirm structure (delete suite + hierarchy shot)' },
-      { id: 'VIS-02', strength: 'PASS_IF_GREEN', oracle: '320/375/768 footer+actions non-occlusion via geom+elementFromPoint + screenshots' },
-      { id: 'VIS-03', strength: 'PASS_IF_GREEN', oracle: 'full Tab forward+reverse inside confirm + Esc restore; focus-after-deleted-trigger' },
-      { id: 'VIS-04', strength: 'PARTIAL', oracle: 'loading aria-busy+allDisabled screenshot captured; hover/focus/active gallery still incomplete' },
-      { id: 'VIS-05', strength: 'PASS_IF_GREEN', oracle: 'rendered getComputedStyle contrast sampling; disabled exempt' },
-      { id: 'VIS-06', strength: 'PARTIAL', oracle: 'narrow empty 375 screenshot added; desktop empty already in delete suite' },
-      { id: 'VIS-07', strength: 'PARTIAL', oracle: 'loading busy shot + sanitized unknown; not a full error-state matrix' },
-      { id: 'VIS-08', strength: 'PASS_IF_GREEN', oracle: 'desktop 409 hierarchy + narrow 375 409 screenshot' },
-      { id: 'VIS-09', strength: 'UNVERIFIED', oracle: 'focus-visible CSS exists; no dedicated focus-ring screenshot gallery' },
+      { id: 'VIS-02', strength: vis02 ? 'PASS' : 'FAIL', oracle: '320/375/768 footer+actions non-occlusion + narrow cancel/success restore tree/footer/head' },
+      { id: 'VIS-03', strength: vis03 ? 'PASS' : 'FAIL', oracle: 'Tab cycle + Esc + desktop post-delete focus + narrow restore focus' },
+      { id: 'VIS-04', strength: vis04_16 ? 'PASS' : 'FAIL', oracle: 'state gallery: default/hover/focus/pressed/disabled/loading/error screenshots+style samples' },
+      { id: 'VIS-05', strength: vis05 ? 'PASS' : 'FAIL', oracle: 'rendered getComputedStyle contrast sampling; disabled exempt' },
+      { id: 'VIS-06', strength: vis06_08 ? 'PASS' : 'FAIL', oracle: 'narrow empty + add-first 375: 例如：张素芬 vs page-footer non-collision geom+elementFromPoint' },
+      { id: 'VIS-07', strength: vis04_16 && vis06_08 ? 'PASS' : 'FAIL', oracle: 'loading busy + error-state gallery (sanitized unknown; no false success)' },
+      { id: 'VIS-08', strength: vis06_08 && hardeningPassed['409 action hierarchy prefers open-child correction over retry delete'] ? 'PASS' : 'FAIL', oracle: 'desktop 409 hierarchy + narrow 375 409 screenshot' },
+      { id: 'VIS-09', strength: vis09 ? 'PASS' : 'FAIL', oracle: 'focus-ring gallery screenshots + keyboard outline oracles on buttons/confirm/input' },
       { id: 'VIS-10', strength: 'PASS', oracle: 'H-12 inferred explanation screenshot (prior closed)' },
       { id: 'VIS-11', strength: 'PASS', oracle: 'unknown never claims success' },
       { id: 'VIS-12', strength: 'PASS', oracle: 'root survivor perspective' },
-      { id: 'VIS-13', strength: 'UNVERIFIED', oracle: 'no dedicated global before/after IDs/edges/root/stats contract pack in this suite' },
-      { id: 'VIS-14', strength: 'UNVERIFIED', oracle: 'true browser-chrome 200% zoom unavailable in headless cloud (see vis-true-zoom-obstacle.json); DPR2/pageScaleFactor rejected' },
-      { id: 'VIS-15', strength: 'PASS_IF_GREEN', oracle: 'paired with VIS-03 keyboard dialogs for delete confirm' },
-      { id: 'VIS-16', strength: 'PARTIAL', oracle: 'loading+disabled captured; default/hover/focus/active series still incomplete' },
+      { id: 'VIS-13', strength: vis13 ? 'PASS' : 'FAIL', oracle: 'global contract pack: login/tree/detail/add/recovery + DEL before/after IDs/edges/root/stats' },
+      { id: 'VIS-14', strength: 'UNVERIFIED', oracle: 'true browser-chrome 200% zoom unavailable in headless cloud (see vis-true-zoom-obstacle.json); DPR2/pageScaleFactor/CSS zoom rejected; Master researching real Chromium page zoom method' },
+      { id: 'VIS-15', strength: vis03 ? 'PASS' : 'FAIL', oracle: 'paired with VIS-03 keyboard dialogs for delete confirm' },
+      { id: 'VIS-16', strength: vis04_16 ? 'PASS' : 'FAIL', oracle: 'paired state gallery series (default/hover/focus/pressed/disabled/loading/error)' },
     ],
   };
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'VIS-COVERAGE-MAP.json'), JSON.stringify(visMap, null, 2));
