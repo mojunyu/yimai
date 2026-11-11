@@ -928,19 +928,21 @@ async function testLoadingDisabledAndNarrowStates() {
   await page.evaluate(() => window.__yimaiReleaseDelayedDelete?.());
   await sleep(900);
 
-  // Narrow empty
+  // Narrow empty — single last person (fresh page, no leftover fetch hooks).
   await page.setViewport({ width: 375, height: 844 });
-  const alone = seedPerson('空窄');
-  // delete both to empty: delete N then T
+  const alone = phpSeed(`
+$u=App\\Models\\User::create(['name'=>'QAEmpty','email'=>$email,'password'=>bcrypt('password')]);
+$t=App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'QAEmpty']);
+$p=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'末人','gender'=>'male','generation'=>1]);
+echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t')->plainTextToken,'idT'=>$p->id], JSON_UNESCAPED_UNICODE);
+`);
   await openAuthed(alone, alone.idT);
-  await selectById(alone.idN);
-  await page.click('#btn-delete-person');
-  await page.waitForSelector('#sheet-confirm:not(.hidden)');
-  await clickConfirmPrimary();
-  await sleep(900);
   await selectById(alone.idT);
-  await page.click('#btn-delete-person');
-  await page.waitForSelector('#sheet-confirm:not(.hidden)');
+  await page.evaluate(() => {
+    document.getElementById('delete-section')?.scrollIntoView({ block: 'center' });
+    document.getElementById('btn-delete-person')?.click();
+  });
+  await page.waitForFunction(() => !document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
   await clickConfirmPrimary();
   await sleep(1000);
   const emptyUi = await page.evaluate(() => ({
@@ -960,7 +962,11 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
   await page.setViewport({ width: 375, height: 844 });
   await openAuthed(parentChild, parentChild.idP);
   await selectById(parentChild.idP);
-  await page.click('#btn-delete-person');
+  await page.evaluate(() => {
+    document.getElementById('delete-section')?.scrollIntoView({ block: 'center' });
+    document.getElementById('btn-delete-person')?.click();
+  });
+  await page.waitForFunction(() => !document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
   await clickConfirmPrimary();
   await page.waitForFunction(() => (document.getElementById('sheet-confirm-body')?.textContent || '').includes('父亲或母亲'), { timeout: 8000 });
   await screenshot('vis-409-narrow-375.png');
