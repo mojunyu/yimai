@@ -419,6 +419,17 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
     max-height: 32vh;
   }
   /*
+   * Empty + first-person sheet on narrow: the shrunk canvas used to stack
+   * empty-title「把家人的名字…」over 世系一览 / legend. Sheet owns the CTA;
+   * hide empty chrome + canvas-foot while sheet is open.
+   */
+  .layout:has(.sheet:not(.hidden)) .empty {
+    display: none !important;
+  }
+  .layout:has(.sheet:not(.hidden)) .canvas-foot {
+    display: none;
+  }
+  /*
    * Confirm open: sheet owns the layout containing block.
    * Root cause of VIS-02: page-footer + residual canvas competed with the sheet,
    * so footer text painted through cancel/actions and body was starved.

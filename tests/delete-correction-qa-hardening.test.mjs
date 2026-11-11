@@ -157,6 +157,10 @@ async function installHooks() {
     window.__yimaiDelayNextPersonGetMs = 0;
     window.__yimaiDelayNextPersonGetMode = null; // 'exists' | 'unknown' | 401 | 403
     window.__yimaiPersonGetGate = null;
+    window.__yimaiDelayNextPersonsListMs = 0;
+    window.__yimaiPersonsListGate = null;
+    window.__yimaiDelayNextTreeGetMs = 0;
+    window.__yimaiTreeGetGate = null;
     window.fetch = async (input, init = {}) => {
       const url = String(input);
       const method = (init.method || 'GET').toUpperCase();
@@ -236,6 +240,37 @@ async function installHooks() {
           throw new TypeError('Failed to fetch (simulated delayed reconcile network fail)');
         }
         // 'exists' — real GET under whatever token is current after release.
+        return window.__yimaiOrigFetch(input, init);
+      }
+      // Delayed GET /persons list — loadPersons sink race after login B.
+      if (
+        window.__yimaiDelayNextPersonsListMs > 0
+        && method === 'GET'
+        && /\/api\/v1\/persons\/?(\?|$)/.test(url)
+        && !/\/persons\/\d+/.test(url)
+      ) {
+        const ms = window.__yimaiDelayNextPersonsListMs;
+        window.__yimaiDelayNextPersonsListMs = 0;
+        let release;
+        window.__yimaiPersonsListGate = new Promise((r) => { release = r; });
+        window.__yimaiReleaseDelayedPersonsList = release;
+        await window.__yimaiPersonsListGate;
+        await new Promise((r) => setTimeout(r, ms));
+        return window.__yimaiOrigFetch(input, init);
+      }
+      // Delayed GET /persons/{id}/tree — loadTree sink race after login B.
+      if (
+        window.__yimaiDelayNextTreeGetMs > 0
+        && method === 'GET'
+        && /\/api\/v1\/persons\/\d+\/tree/.test(url)
+      ) {
+        const ms = window.__yimaiDelayNextTreeGetMs;
+        window.__yimaiDelayNextTreeGetMs = 0;
+        let release;
+        window.__yimaiTreeGetGate = new Promise((r) => { release = r; });
+        window.__yimaiReleaseDelayedTreeGet = release;
+        await window.__yimaiTreeGetGate;
+        await new Promise((r) => setTimeout(r, ms));
         return window.__yimaiOrigFetch(input, init);
       }
       return window.__yimaiOrigFetch(input, init);
@@ -935,10 +970,16 @@ async function testSameAccountReconcileDelayedExistsStillWorks() {
 }
 
 async function testIdentityBoundaryTransitionTable() {
-  // Finite table of DEL/login awaits that may commit UI/state — oracle = frozenAuthorityStillActive / sheetOpStillCurrent.
+  // Finite sink list: protection at actual state/localStorage/render commits, not only callers.
   const table = {
-    premiseRejected: 'Guarding only submitSheetOp aftermath does NOT make account-switch safe; reconcile post-await and identity-transition detail survive.',
-    reusableOracle: 'frozenAuthorityStillActive(frozen) = same opGen + authorityMatches; sheetOpStillCurrent adds live sheetOp ownership. Any post-await UI commit must pass before mutating confirm/detail.',
+    premisesRejected: [
+      'Guarding only submitSheetOp aftermath does NOT make account-switch safe',
+      'Guarding only await callers of loadPersons/loadTree is also insufficient — sinks inside those functions write after their own awaits',
+    ],
+    reusableOracles: {
+      sheetOp: 'frozenAuthorityStillActive / sheetOpStillCurrent',
+      load: 'captureLoadSession + loadSessionStillCurrent before persons/treeId/root/tree/render/openSheet sinks',
+    },
     transitions: [
       { id: 'T1', site: 'submitSheetOp after DELETE/PATCH await', commit: 'afterSuccessfulDelete/Correction', oracle: 'sheetOpStillCurrent' },
       { id: 'T2', site: 'submitSheetOp catch', commit: 'showDeleteBlocked409 / showUnknownResult / reject error', oracle: 'sheetOpStillCurrent' },
@@ -948,24 +989,140 @@ async function testIdentityBoundaryTransitionTable() {
       { id: 'T6', site: 'reconcileAndContinue after reconcileRelationship', commit: 'exists reopen / showUnknownResult / afterSuccessful*', oracle: 'frozenAuthorityStillActive' },
       { id: 'T7', site: 'reconcileAndContinue finally', commit: 'setConfirmBusy(false)', oracle: 'frozenAuthorityStillActive' },
       { id: 'T8', site: 'showUnknownResult entry', commit: 'openConfirmLayer unknown', oracle: 'frozenAuthorityStillActive (else hide only)' },
-      { id: 'T9', site: 'login → invalidateSheetOpForAuthChange', commit: 'bump opGen + clearAccountScopedPresentation', oracle: 'generation bump fails T1–T8' },
-      { id: 'T10', site: 'login → loadTree', commit: 'must not repaint foreign detail (selectedId cleared; sheet closed)', oracle: 'B view negative: no A name/谱号/actions' },
+      { id: 'T9', site: 'login → invalidateSheetOpForAuthChange', commit: 'bump opGen + clearAccountScopedPresentation', oracle: 'generation bump fails T1–T8 and load snaps' },
+      { id: 'T10', site: 'login → loadTree', commit: 'must not repaint foreign detail', oracle: 'B view negative: no A name/谱号/actions' },
+      { id: 'T11', site: 'loadPersons after await api(/persons)', commit: 'state.persons + syncTreeIdFromPersons/TREE_KEY', oracle: 'loadSessionStillCurrent' },
+      { id: 'T12', site: 'loadTree after await tree', commit: 'state.tree + rootId/ROOT_KEY + render + openSheet', oracle: 'loadSessionStillCurrent' },
+      { id: 'T13', site: 'ensureCurrentTreeId after await /trees/current', commit: 'state.treeId + TREE_KEY', oracle: 'loadSessionStillCurrent' },
     ],
+    note: 'Source risk until delayed-A list/tree negative oracles pass. No claim that cross-account deletion of B was observed.',
   };
   const source = fs.readFileSync(path.join(APP_ROOT, 'frontend/js/app.js'), 'utf8');
   const checks = {
     hasFrozenOracle: source.includes('function frozenAuthorityStillActive'),
     hasSheetOpOracle: source.includes('function sheetOpStillCurrent'),
+    hasLoadSessionOracle: source.includes('function loadSessionStillCurrent') && source.includes('function captureLoadSession'),
     hasPresentationClear: source.includes('function clearAccountScopedPresentation'),
     reconcileGuarded: /async function reconcileAndContinue[\s\S]*frozenAuthorityStillActive\(frozen\)/.test(source)
       && /const result = await reconcileRelationship\(frozen\);[\s\S]*if \(!frozenAuthorityStillActive\(frozen\)\) return;/.test(source),
     showUnknownGuarded: /function showUnknownResult[\s\S]*frozenAuthorityStillActive\(op\)/.test(source),
     loginClearsPresentation: /invalidateSheetOpForAuthChange\('login'\)/.test(source)
       && /clearAccountScopedPresentation\(/.test(source),
+    loadPersonsGuarded: /async function loadPersons[\s\S]*captureLoadSession\(\)[\s\S]*await api\('\/persons'\)[\s\S]*loadSessionStillCurrent\(snap\)/.test(source),
+    loadTreeGuarded: /async function loadTree[\s\S]*captureLoadSession\(\)[\s\S]*loadSessionStillCurrent\(snap\)/.test(source),
   };
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del-identity-boundary-transition-table.json'), JSON.stringify({ table, checks }, null, 2));
-  const ok = Object.values(checks).every(Boolean) && table.transitions.length === 10;
-  log('Identity-boundary premise+transition table (10) + oracle wiring present', ok, JSON.stringify(checks));
+  const ok = Object.values(checks).every(Boolean) && table.transitions.length === 13;
+  log('Identity-boundary premise+transition table (13 sinks) + oracle wiring present', ok, JSON.stringify(checks));
+}
+
+async function snapshotBSurface() {
+  return page.evaluate(() => {
+    const ids = Array.from(document.querySelectorAll('g.node-card')).map((n) => n.getAttribute('data-id')).sort();
+    const names = Array.from(document.querySelectorAll('g.node-card .person-name')).map((n) => n.textContent.trim());
+    return {
+      userId: localStorage.getItem('yimai_user_id'),
+      treeId: localStorage.getItem('yimai_tree_id'),
+      rootId: localStorage.getItem('yimai_root_id'),
+      recovery: localStorage.getItem('yimai_add_recovery'),
+      ids,
+      names,
+      title: document.getElementById('sheet-title')?.textContent || '',
+      puhao: document.getElementById('sheet-puhao')?.textContent || '',
+      sheetHidden: document.getElementById('sheet')?.classList.contains('hidden'),
+      stats: document.getElementById('stats')?.textContent?.replace(/\s+/g, ' ').trim() || '',
+    };
+  });
+}
+
+async function testDelayedAPersonsListAfterBLoaded() {
+  // Negative oracle: A loadPersons in-flight → B completes load → release A list must not pollute B.
+  const { a, b } = seedForeign();
+  await openAuthed(a, a.idP);
+  await installHooks();
+  await selectById(a.idP);
+  await page.evaluate(() => { window.__yimaiDelayNextPersonsListMs = 40; });
+  // Trigger loadPersons via reload toolbar (same sink as DEL/login loaders).
+  await page.click('#btn-reload');
+  await page.waitForFunction(() => typeof window.__yimaiReleaseDelayedPersonsList === 'function', { timeout: 8000 });
+  await page.$eval('#email', (el, v) => { el.value = v; }, b.email);
+  await page.$eval('#password', (el) => { el.value = 'password'; });
+  await page.click('#btn-login');
+  await page.waitForFunction((id) => localStorage.getItem('yimai_user_id') === String(id), { timeout: 15000 }, String(b.userId));
+  await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 15000 });
+  const beforeRelease = await snapshotBSurface();
+  await page.evaluate(() => window.__yimaiReleaseDelayedPersonsList?.());
+  await sleep(1000);
+  const afterRelease = await snapshotBSurface();
+  const polluted = afterRelease.names.includes('甲树人')
+    || afterRelease.ids.includes(String(a.idP))
+    || afterRelease.title.includes('甲树人')
+    || afterRelease.puhao.includes(String(a.idP))
+    || afterRelease.treeId === String(a.treeId)
+    || afterRelease.rootId === String(a.idP);
+  const bStable = beforeRelease.userId === String(b.userId)
+    && afterRelease.userId === String(b.userId)
+    && afterRelease.treeId === String(b.treeId)
+    && afterRelease.ids.includes(String(b.idP))
+    && !polluted;
+  await screenshot('del7-delayed-a-persons-after-b.png');
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del7-delayed-a-persons-after-b.json'), JSON.stringify({
+    beforeRelease, afterRelease, polluted, bStable, a: { idP: a.idP, treeId: a.treeId }, b: { idP: b.idP, treeId: b.treeId },
+    note: 'Source-risk sink closed if bStable; does not claim cross-account deletion.',
+  }, null, 2));
+  log('Load-sink delayed A persons list after B loaded — B canvas/treeId/root clean', bStable, JSON.stringify({ polluted, treeId: afterRelease.treeId, ids: afterRelease.ids }));
+}
+
+async function testDelayedATreeAfterBLoaded() {
+  const { a, b } = seedForeign();
+  await openAuthed(a, a.idP);
+  await installHooks();
+  await selectById(a.idP);
+  await page.evaluate(() => { window.__yimaiDelayNextTreeGetMs = 40; });
+  await page.click('#btn-reload');
+  await page.waitForFunction(() => typeof window.__yimaiReleaseDelayedTreeGet === 'function', { timeout: 8000 });
+  await page.$eval('#email', (el, v) => { el.value = v; }, b.email);
+  await page.$eval('#password', (el) => { el.value = 'password'; });
+  await page.click('#btn-login');
+  await page.waitForFunction((id) => localStorage.getItem('yimai_user_id') === String(id), { timeout: 15000 }, String(b.userId));
+  await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 15000 });
+  const beforeRelease = await snapshotBSurface();
+  await page.evaluate(() => window.__yimaiReleaseDelayedTreeGet?.());
+  await sleep(1000);
+  const afterRelease = await snapshotBSurface();
+  const polluted = afterRelease.names.includes('甲树人')
+    || afterRelease.ids.includes(String(a.idP))
+    || afterRelease.title.includes('甲树人')
+    || afterRelease.puhao.includes(String(a.idP))
+    || afterRelease.rootId === String(a.idP)
+    || afterRelease.treeId === String(a.treeId);
+  const bStable = beforeRelease.userId === String(b.userId)
+    && afterRelease.userId === String(b.userId)
+    && afterRelease.treeId === String(b.treeId)
+    && afterRelease.ids.includes(String(b.idP))
+    && afterRelease.names.includes('乙树人')
+    && !polluted;
+  await screenshot('del7-delayed-a-tree-after-b.png');
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del7-delayed-a-tree-after-b.json'), JSON.stringify({
+    beforeRelease, afterRelease, polluted, bStable, a: { idP: a.idP, treeId: a.treeId }, b: { idP: b.idP, treeId: b.treeId },
+    note: 'Source-risk sink closed if bStable; does not claim cross-account deletion.',
+  }, null, 2));
+  log('Load-sink delayed A tree after B loaded — B canvas/treeId/root clean', bStable, JSON.stringify({ polluted, rootId: afterRelease.rootId, names: afterRelease.names }));
+}
+
+async function testSameAccountReloadAfterDelayStillWorks() {
+  const auth = seedPerson('同账载入');
+  await openAuthed(auth, auth.idT);
+  await installHooks();
+  await page.evaluate(() => { window.__yimaiDelayNextPersonsListMs = 30; });
+  await page.click('#btn-reload');
+  await page.waitForFunction(() => typeof window.__yimaiReleaseDelayedPersonsList === 'function', { timeout: 8000 });
+  await page.evaluate(() => window.__yimaiReleaseDelayedPersonsList?.());
+  await page.waitForFunction((id) => !!document.querySelector(`g.node-card[data-id="${id}"]`), { timeout: 10000 }, String(auth.idT));
+  const snap = await snapshotBSurface();
+  const ok = snap.ids.includes(String(auth.idT)) && snap.userId === String(auth.userId);
+  await screenshot('del7-same-account-delayed-persons-reload.png');
+  log('Same-account delayed persons reload still commits under A', ok, JSON.stringify({ ids: snap.ids, userId: snap.userId }));
 }
 
 async function testSameAccountDelayedDeleteStillWorks() {
@@ -1217,6 +1374,29 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
     formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
   }));
   const emptyCollision = await measureAddNameFooterCollision();
+  const emptyLegend = await page.evaluate(() => {
+    const empty = document.getElementById('empty');
+    const title = empty?.querySelector('.empty-title');
+    const label = document.querySelector('.canvas-label');
+    const legend = document.querySelector('.legend');
+    const emptyCs = empty ? getComputedStyle(empty) : null;
+    const emptyHidden = !empty || empty.classList.contains('hidden') || emptyCs?.display === 'none';
+    const overlap = (a, b) => {
+      if (!a || !b) return false;
+      return !(a.bottom <= b.top + 0.5 || a.top >= b.bottom - 0.5 || a.right <= b.left + 0.5 || a.left >= b.right - 0.5);
+    };
+    const tb = title?.getBoundingClientRect();
+    const lb = label?.getBoundingClientRect();
+    const gb = legend?.getBoundingClientRect();
+    const titleVisible = Boolean(title && !emptyHidden && (tb?.height || 0) > 0 && emptyCs?.display !== 'none');
+    return {
+      emptyHidden,
+      titleVisible,
+      titleLegendOverlap: titleVisible && overlap(tb, gb),
+      titleLabelOverlap: titleVisible && overlap(tb, lb),
+      ok: emptyHidden || (!overlap(tb, gb) && !overlap(tb, lb)),
+    };
+  });
   await screenshot('vis-empty-narrow-375.png');
 
   // Add-first flow without delete: empty tree → 添加 opens first-person form above footer.
@@ -1264,19 +1444,21 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
   await screenshot('vis-409-narrow-375.png');
   const order = await page.evaluate(() => Array.from(document.querySelectorAll('#sheet-confirm-actions button')).map((b) => b.textContent.trim()));
 
-  const payload = { busy, emptyUi, emptyCollision, addFirstCollision, order };
+  const payload = { busy, emptyUi, emptyCollision, emptyLegend, addFirstCollision, order };
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-loading-empty-409.json'), JSON.stringify(payload, null, 2));
   const ok = busy.ariaBusy === 'true'
     && busy.allDisabled
     && emptyUi.emptyHidden === false
     && emptyUi.placeholder.includes('张素芬')
     && emptyCollision.ok
+    && emptyLegend.ok
     && addFirstCollision.ok
     && order[0]?.includes('打开并更正');
   log('VIS-04/06/07/08 loading busy + narrow empty/add-first footer + narrow 409', ok, JSON.stringify({
     busy,
     emptyUi,
     emptyOk: emptyCollision.ok,
+    emptyLegendOk: emptyLegend.ok,
     addFirstOk: addFirstCollision.ok,
     order,
   }));
@@ -1776,24 +1958,45 @@ async function testTrueBrowserZoomObstacle() {
   const playwrightProbe = fs.existsSync(playwrightProbePath)
     ? JSON.parse(fs.readFileSync(playwrightProbePath, 'utf8'))
     : { status: 'PENDING_EXTERNAL_PROBE', note: 'Run tests/vis-true-zoom-playwright-probe.mjs before claiming VIS-14' };
-  const productOk = playwrightProbe.status === 'PRODUCT_OK' && playwrightProbe.product?.ok === true;
-  const methodOnly = playwrightProbe.status === 'METHOD_OK';
+  const productFile = path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png');
+  const methodFile = path.join(ARTIFACTS_DIR, 'vis-true-zoom-200.png');
+  const addFile = path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-add.png');
+  let framesDistinct = false;
+  if (fs.existsSync(productFile) && fs.existsSync(methodFile)) {
+    const a = fs.readFileSync(productFile);
+    const b = fs.readFileSync(methodFile);
+    framesDistinct = a.length !== b.length || !a.equals(b);
+  }
+  const productOk = playwrightProbe.status === 'PRODUCT_OK'
+    && playwrightProbe.product?.ok === true
+    && playwrightProbe.product?.operableConfirm === true
+    && playwrightProbe.product?.confirmTitleInView === true
+    && framesDistinct
+    && fs.existsSync(productFile)
+    && fs.existsSync(addFile);
+  const methodOnly = playwrightProbe.status === 'METHOD_OK' || (playwrightProbe.status === 'PRODUCT_OK' && !productOk);
   const obstacle = {
     status: productOk ? 'PRODUCT_OK' : (methodOnly ? 'METHOD_OK_PENDING_PRODUCT' : 'UNVERIFIED'),
     reason: productOk
-      ? 'Playwright chrome.tabs.setZoom(2) true page zoom + product readable/operable/no-x-overflow at 200%'
+      ? 'True page zoom + same-frame product clips (confirm/add in view; method png ≠ product png)'
       : (methodOnly
-        ? 'True page zoom method OK but product assertions incomplete — not VIS-14 PASS'
+        ? 'True page zoom method present but product frame/oracle incomplete — method PASS ≠ product PASS'
         : (playwrightProbe.reason
           || 'Puppeteer/CDP path cannot true-zoom; Playwright extension probe missing/failed')),
     probe,
     cdpPageScaleFactor: cdp,
     afterCtrlPlus: afterCtrl,
     playwrightProbe,
+    framesDistinct,
+    files: {
+      method: fs.existsSync(methodFile),
+      product: fs.existsSync(productFile),
+      add: fs.existsSync(addFile),
+    },
   };
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-true-zoom-obstacle.json'), JSON.stringify(obstacle, null, 2));
   if (productOk) {
-    log('VIS-14 true browser 200% zoom product acceptance', true, 'PRODUCT_OK via chrome.tabs.setZoom + operable/no-x-overflow');
+    log('VIS-14 true browser 200% zoom product acceptance', true, 'PRODUCT_OK same-frame confirm/add clips + operable/no-x-overflow');
   } else {
     noteUnverified('VIS-14 true browser 200% zoom', obstacle.reason);
   }
@@ -1963,6 +2166,9 @@ async function runAll() {
     () => testReconcileInFlightThenLoginB('401'),
     () => testReconcileInFlightThenLoginB('403'),
     testSameAccountReconcileDelayedExistsStillWorks,
+    testDelayedAPersonsListAfterBLoaded,
+    testDelayedATreeAfterBLoaded,
+    testSameAccountReloadAfterDelayStillWorks,
     testReconcile401and403Unknown,
     testWriteSuccessRefreshFailNoRepeatMutation,
     testUnrelatedRecoveryPreserved,

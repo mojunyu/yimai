@@ -143,16 +143,39 @@ function authorityMatches(op) {
  * Generation+identity still active (works after hideConfirmLayer clears sheetOp).
  * Login/invalidate bumps sheetOpGen so in-flight awaits fail this check.
  *
- * Premise under test: guarding only submitSheetOp aftermath is NOT enough —
- * reconcileAndContinue / showUnknownResult / identity-transition detail paint
- * can still commit foreign UI. Every post-await UI commit in DEL confirm /
- * reconcile / success / failure / finally AND login presentation must pass
- * this (or sheetOpStillCurrent) before mutating the sheet.
+ * Premises under test (both rejected if only caller-side):
+ * 1) guarding submitSheetOp aftermath alone ≠ account-switch safe
+ * 2) guarding only await *callers* of loadPersons/loadTree is also insufficient —
+ *    those functions write persons/treeId/root/render/openSheet after their own awaits.
+ * Protection must hold at actual state/localStorage/render sinks (see captureLoadSession).
  */
 function frozenAuthorityStillActive(frozen) {
   if (!frozen || frozen.opGen == null) return false;
   if (frozen.opGen !== state.sheetOpGen) return false;
   return authorityMatches(frozen);
+}
+
+/** Snapshot identity + session generation at load start (before any await). */
+function captureLoadSession() {
+  return {
+    opGen: Number(state.sheetOpGen) || 0,
+    token: state.token || '',
+    userId: state.userId ? String(state.userId) : '',
+    treeId: state.treeId ? String(state.treeId) : '',
+  };
+}
+
+/**
+ * True iff this in-flight load may still commit. Login bumps sheetOpGen and
+ * replaces token/userId/treeId — delayed A responses must fail this check.
+ */
+function loadSessionStillCurrent(snap) {
+  if (!snap) return false;
+  if ((Number(state.sheetOpGen) || 0) !== (Number(snap.opGen) || 0)) return false;
+  if ((state.token || '') !== (snap.token || '')) return false;
+  if (String(state.userId || '') !== String(snap.userId || '')) return false;
+  if (snap.treeId && state.treeId && !sameId(snap.treeId, state.treeId)) return false;
+  return true;
 }
 
 /**
@@ -187,6 +210,9 @@ function clearAccountScopedPresentation() {
   state.confirmTrigger = null;
   state.rootId = '';
   localStorage.removeItem(ROOT_KEY);
+  // Drop prior tree scope pointer; login/ensureCurrentTreeId re-acquires for the new identity.
+  state.treeId = '';
+  localStorage.removeItem(TREE_KEY);
   state.tree = { root_id: null, nodes: [], edges: [] };
   state.persons = [];
   state.mode = 'detail';
@@ -455,7 +481,9 @@ function recoveryScopedOk(rec) {
 async function ensureCurrentTreeId({ force = false } = {}) {
   if (!state.token) return '';
   if (state.treeId && !force) return state.treeId;
+  const snap = captureLoadSession();
   const tree = await api('/trees/current');
+  if (!loadSessionStillCurrent(snap)) return state.treeId || '';
   if (tree?.id != null) {
     state.treeId = String(tree.id);
     localStorage.setItem(TREE_KEY, state.treeId);
@@ -514,7 +542,10 @@ async function loadPersons() {
     state.persons = [];
     return;
   }
+  const snap = captureLoadSession();
   const list = await api('/persons');
+  // Sink: do not write foreign persons/treeId after identity change mid-await.
+  if (!loadSessionStillCurrent(snap)) return;
   state.persons = list.data || [];
   syncTreeIdFromPersons();
 }
@@ -632,20 +663,27 @@ async function login() {
 
 async function loadTree() {
   if (!state.token) return;
+  const snap = captureLoadSession();
   try {
     await ensureCurrentTreeId();
   } catch (_) { /* persons path may still sync later */ }
+  if (!loadSessionStillCurrent(snap)) return;
   await loadPersons();
+  if (!loadSessionStillCurrent(snap)) return;
   syncRootWithPersons();
   if (!state.rootId) {
+    if (!loadSessionStillCurrent(snap)) return;
     state.tree = { root_id: null, nodes: [], edges: [] };
     render();
     return;
   }
 
+  const rootForRequest = state.rootId;
+  let treePayload;
   try {
-    state.tree = await api(`/persons/${state.rootId}/tree`);
+    treePayload = await api(`/persons/${rootForRequest}/tree`);
   } catch (err) {
+    if (!loadSessionStillCurrent(snap)) return;
     // Recover only when root is stale/foreign (not in current persons).
     // Transient failures on a known root must surface to callers (e.g. post-save display).
     const rootKnown = state.persons.some((p) => sameId(p.id, state.rootId));
@@ -658,8 +696,11 @@ async function loadTree() {
       render();
       throw err;
     }
-    state.tree = await api(`/persons/${state.rootId}/tree`);
+    treePayload = await api(`/persons/${state.rootId}/tree`);
   }
+  // Sink: tree/root/render/openSheet only if still the initiating session.
+  if (!loadSessionStillCurrent(snap)) return;
+  state.tree = treePayload;
   state.rootId = String(state.tree.root_id);
   localStorage.setItem(ROOT_KEY, state.rootId);
   if (state.selectedId && !findPerson(state.selectedId)) {

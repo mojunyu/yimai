@@ -245,6 +245,12 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
           vvScale: window.visualViewport?.scale ?? null,
         }));
         await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 15000 });
+        // Method-only viewport frame (not product). Distinct from product confirm clip.
+        await page.screenshot({
+          path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200.png'),
+          fullPage: false,
+        });
+
         // Use evaluate clicks — at true 200% page zoom, hit-testing can miss overlapping chrome.
         await page.evaluate((id) => {
           document.querySelector(`g.node-card[data-id="${id}"]`)?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -255,47 +261,108 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
           document.querySelector('#kin-grid button[data-kin="son"]')?.click();
         });
         await page.waitForSelector('#form-add:not(.hidden)', { timeout: 8000 });
-        const addReachable = await page.evaluate(() => {
+        await page.evaluate(() => {
+          document.getElementById('add-name')?.scrollIntoView({ block: 'center', inline: 'nearest' });
+        });
+        await page.waitForTimeout(150);
+        const addFrame = await page.evaluate(() => {
           const name = document.getElementById('add-name');
           const box = name?.getBoundingClientRect();
-          return Boolean(box && box.width > 0 && box.height > 0 && box.top < window.innerHeight);
+          const inView = Boolean(box && box.width > 0 && box.height > 0
+            && box.top >= 0 && box.bottom <= window.innerHeight + 1
+            && box.left >= 0 && box.right <= window.innerWidth + 1);
+          return {
+            ok: inView,
+            clip: box ? {
+              x: Math.max(0, Math.floor(box.left - 8)),
+              y: Math.max(0, Math.floor(box.top - 40)),
+              width: Math.min(window.innerWidth, Math.ceil(box.width + 16)),
+              height: Math.min(window.innerHeight, Math.ceil(box.height + 80)),
+            } : null,
+          };
         });
+        if (addFrame.clip && addFrame.clip.width > 0 && addFrame.clip.height > 0) {
+          await page.screenshot({
+            path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-add.png'),
+            clip: addFrame.clip,
+          });
+        }
         await page.evaluate(() => document.getElementById('btn-cancel-add')?.click());
         await page.evaluate(() => {
           document.getElementById('delete-section')?.scrollIntoView({ block: 'nearest' });
           document.getElementById('btn-delete-person')?.click();
         });
         await page.waitForSelector('#sheet-confirm:not(.hidden)', { timeout: 8000 });
+        await page.evaluate(() => {
+          document.getElementById('sheet-confirm')?.scrollIntoView({ block: 'center', inline: 'nearest' });
+          document.querySelector('#sheet-confirm-actions button')?.scrollIntoView({ block: 'nearest' });
+        });
+        await page.waitForTimeout(150);
+        // Same-frame oracle + clip: screenshot must show the controls just measured.
         product = await page.evaluate((ctx) => {
           const overflowX = document.documentElement.scrollWidth > window.innerWidth + 1;
           const title = document.getElementById('sheet-title')?.textContent || '';
           const confirmTitle = document.getElementById('sheet-confirm-title')?.textContent || '';
           const cancel = document.querySelector('#sheet-confirm-actions button');
+          const confirm = document.getElementById('sheet-confirm');
           const cancelBox = cancel?.getBoundingClientRect();
-          const operableConfirm = Boolean(cancelBox && cancelBox.width > 0 && cancelBox.height > 0);
+          const confirmBox = confirm?.getBoundingClientRect();
+          const operableConfirm = Boolean(
+            cancelBox && cancelBox.width > 0 && cancelBox.height > 0
+            && cancelBox.top >= 0 && cancelBox.bottom <= window.innerHeight + 1,
+          );
+          const confirmTitleInView = Boolean(confirmTitle && confirmBox
+            && confirmBox.top < window.innerHeight && confirmBox.bottom > 0);
           const at200 = ctx.iw <= 700 && (ctx.vvScale == null || Math.abs(ctx.vvScale - 1) < 0.15);
+          const clip = confirmBox ? {
+            x: Math.max(0, Math.floor(Math.min(confirmBox.left, cancelBox?.left || confirmBox.left))),
+            y: Math.max(0, Math.floor(confirmBox.top)),
+            width: Math.min(window.innerWidth, Math.ceil(Math.max(confirmBox.width, (cancelBox?.right || confirmBox.right) - confirmBox.left))),
+            height: Math.min(
+              window.innerHeight - Math.max(0, confirmBox.top),
+              Math.ceil((cancelBox?.bottom || confirmBox.bottom) - confirmBox.top + 8),
+            ),
+          } : null;
           return {
             overflowX,
             title,
             confirmTitle,
             operableConfirm,
+            confirmTitleInView,
             addReachable: ctx.addOk,
+            clip,
             iw: window.innerWidth,
             dpr: window.devicePixelRatio,
             vvScale: window.visualViewport?.scale ?? null,
             reZoomOk: ctx.ok,
-            readable: title.length > 0 && confirmTitle.length > 0,
-            ok: ctx.ok && at200 && !overflowX && ctx.addOk && title.length > 0 && confirmTitle.length > 0 && operableConfirm,
+            readable: title.length > 0 && confirmTitle.length > 0 && confirmTitleInView,
+            ok: ctx.ok && at200 && !overflowX && ctx.addOk && operableConfirm && confirmTitleInView
+              && title.length > 0 && confirmTitle.length > 0,
           };
         }, {
           ok: Boolean(reZoom?.ok && Math.abs(Number(reZoom.zoom) - 2) < 0.05),
-          addOk: addReachable,
+          addOk: addFrame.ok,
           ...zoomed,
         });
-        await page.screenshot({ path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png'), fullPage: true });
+        if (product?.clip && product.clip.width > 10 && product.clip.height > 10) {
+          await page.screenshot({
+            path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png'),
+            clip: product.clip,
+          });
+        } else {
+          await page.screenshot({
+            path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png'),
+            fullPage: false,
+          });
+        }
+        product.screenshotFrame = {
+          product: 'vis-true-zoom-200-product.png',
+          add: 'vis-true-zoom-200-add.png',
+          methodOnly: 'vis-true-zoom-200.png',
+          note: 'product/add clips are same-session frames as operableConfirm/addReachable; methodOnly ≠ product PASS',
+        };
         await page.keyboard.press('Escape');
       }
-      await page.screenshot({ path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200.png'), fullPage: true });
     }
 
     await context.close().catch(() => {});
