@@ -475,16 +475,6 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
   .sheet.confirm-open .sheet-head {
     display: none;
   }
-  /*
-   * Confirm is modal on the narrow column: topbar + workspace-head otherwise
-   * starve title/actions at short CSS heights (true 200% page zoom → ~400px).
-   */
-  body:has(.sheet.confirm-open) .topbar {
-    display: none;
-  }
-  .workspace:has(.sheet.confirm-open) .workspace-head {
-    display: none;
-  }
 }
 /* Short CSS viewport (true page zoom / short phone): give sheet/empty room. */
 @media (max-width: 1000px) and (max-height: 700px) {
@@ -495,12 +485,32 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
   .empty-book { display: none; }
   .empty p:not(.empty-title):not(.hint) { display: none; }
   .empty .empty-title { font-size: 16px; }
-  /* Sheet open at short height: collapse chrome so add/confirm controls stay operable. */
-  body:has(.sheet:not(.hidden)) .topbar {
-    display: none;
+  /*
+   * Only on short CSS heights (200% page zoom → ~400px, short phones).
+   * Do not collapse topbar on tall narrow (375×844) — restoring display/height
+   * after confirm was dumping focus onto <body> and failing VIS-02/03 restore.
+   * max-height collapse (not display:none) still frees space for confirm/add.
+   */
+  body:has(.sheet:not(.hidden)) .topbar,
+  body:has(.sheet.confirm-open) .topbar {
+    max-height: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+    border: 0;
   }
-  .workspace:has(.sheet:not(.hidden)) .workspace-head {
-    display: none;
+  .workspace:has(.sheet:not(.hidden)) .workspace-head,
+  .workspace:has(.sheet.confirm-open) .workspace-head {
+    max-height: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
   }
 }
 @media (max-width: 768px) {

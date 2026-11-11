@@ -1265,27 +1265,51 @@ function focusAfterConfirmClose(options = {}) {
     node.focus?.();
     return document.activeElement === node;
   };
-  // #btn-delete-person is a singleton that survives person deletion — after a
-  // successful delete, prefer a live node / 添加 instead of returning to it.
-  const skipSingletonDeleteTrigger = Boolean(options.afterSuccessfulDelete)
-    && trigger
-    && trigger.id === 'btn-delete-person';
-  if (!skipSingletonDeleteTrigger && tryFocus(trigger)) return;
   const selected = findPerson(state.selectedId);
-  if (selected) {
-    const card = el.canvas?.querySelector(`.node-card[data-id="${selected.id}"]`);
-    if (tryFocus(card)) return;
-  }
-  const root = findPerson(state.rootId);
-  if (root) {
-    const card = el.canvas?.querySelector(`.node-card[data-id="${root.id}"]`);
-    if (tryFocus(card)) return;
-  }
-  if (tryFocus(el.add)) return;
-  // Never leave focus on body / detached deleted controls.
-  const active = document.activeElement;
-  if (!active || active === document.body || !document.body.contains(active)) {
-    el.add?.focus?.();
+  const focusTargets = () => {
+    const nodes = [];
+    // #btn-delete-person is a singleton that survives person deletion — after a
+    // successful delete, prefer a live node / 添加 instead of returning to it.
+    const skipSingletonDeleteTrigger = Boolean(options.afterSuccessfulDelete)
+      && trigger
+      && trigger.id === 'btn-delete-person';
+    if (!skipSingletonDeleteTrigger && trigger) nodes.push(trigger);
+    if (selected) {
+      nodes.push(el.canvas?.querySelector(`.node-card[data-id="${selected.id}"]`));
+    }
+    const root = findPerson(state.rootId);
+    if (root) {
+      nodes.push(el.canvas?.querySelector(`.node-card[data-id="${root.id}"]`));
+    }
+    nodes.push(el.add);
+    return nodes;
+  };
+  const applyFocus = () => {
+    for (const node of focusTargets()) {
+      if (tryFocus(node)) return true;
+    }
+    const active = document.activeElement;
+    if (!active || active === document.body || !document.body.contains(active)) {
+      el.add?.focus?.();
+    }
+    return false;
+  };
+  applyFocus();
+  // Tall narrow layouts reflow when confirm-open chrome restores; SVG focus can
+  // stick for a tick then fall back to <body>. Re-assert on the next frames.
+  if (options.afterSuccessfulDelete && typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body || !isFocusableLiveTarget(active)) {
+        applyFocus();
+      }
+      requestAnimationFrame(() => {
+        const again = document.activeElement;
+        if (!again || again === document.body || !isFocusableLiveTarget(again)) {
+          applyFocus();
+        }
+      });
+    });
   }
 }
 
