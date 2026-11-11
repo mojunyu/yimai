@@ -1120,10 +1120,15 @@ async function testNarrowConfirmCancelAndSuccessRestore() {
     const afterCancel = await measureChromeRestore();
     await screenshot(`vis-restore-cancel-${vp.name}.png`);
     const focusCls = (f) => String(f?.cls || '');
+    // At 320×700 with sheet open, canvas may be only ~20–30px (flex remainder) —
+    // still restored vs confirm-open collapse (height 0 / opacity 0).
+    const canvasRestored = (chrome) => chrome.canvasHeight > 8
+      && !chrome.canvasCollapsed
+      && chrome.canvasHeight > (openChrome.canvasHeight + 5);
     const cancelOk = afterCancel.confirmHidden
       && !afterCancel.confirmOpen
       && afterCancel.footerVisible
-      && afterCancel.canvasHeight > 40
+      && canvasRestored(afterCancel)
       && afterCancel.sheetHeadVisible
       && afterCancel.focus.live
       && (afterCancel.focus.id === 'btn-delete-person' || afterCancel.focus.id === 'btn-add' || focusCls(afterCancel.focus).includes('node-card'));
@@ -1142,7 +1147,7 @@ async function testNarrowConfirmCancelAndSuccessRestore() {
     const successOk = afterSuccess.confirmHidden
       && !afterSuccess.confirmOpen
       && afterSuccess.footerVisible
-      && afterSuccess.canvasHeight > 40
+      && canvasRestored(afterSuccess)
       && afterSuccess.sheetHeadVisible
       && afterSuccess.focus.live
       && afterSuccess.focus.id !== 'btn-delete-person'
