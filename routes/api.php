@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\PersonController;
+use App\Http\Controllers\Api\V1\SiblingLinkController;
 use App\Http\Controllers\Api\V1\SpouseLinkController;
 use App\Http\Controllers\Api\V1\TreeController;
 use Illuminate\Support\Facades\Route;
@@ -33,5 +34,9 @@ Route::prefix('v1')->group(function () {
         Route::post('spouse-links', [SpouseLinkController::class, 'store']);
         Route::patch('spouse-links/{id}', [SpouseLinkController::class, 'update']);
         Route::delete('spouse-links/{id}', [SpouseLinkController::class, 'destroy']);
+
+        Route::get('sibling-links', [SiblingLinkController::class, 'index']);
+        Route::post('sibling-links', [SiblingLinkController::class, 'store']);
+        Route::delete('sibling-links/{id}', [SiblingLinkController::class, 'destroy']);
     });
 });

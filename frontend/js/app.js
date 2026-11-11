@@ -12,7 +12,8 @@ const ERROR_ZH = {
   'A person cannot be their own parent.': '一个人不能认自己为父母。',
   'Parent must belong to the same tree.': '只能认同一本家谱里的人为父母。',
   'A person cannot be their own spouse.': '不能和自己结为夫妻。',
-  'Person must belong to the same tree.': '只能和同一本家谱里的人结为夫妻。',
+  'A person cannot be their own sibling.': '一个人不能认自己为兄弟姐妹。',
+  'Person must belong to the same tree.': '只能认同一本家谱里的人。',
   'An open spouse link already exists for this pair.': '这两位已经记过还在续的夫妻关系了。',
   'death_year must be greater than or equal to birth_year.': '去世的年份不能早于出生的年份。',
   'end_year must be greater than or equal to start_year.': '结束的年份不能早于成亲的年份。',
@@ -180,6 +181,7 @@ function countEdges(tree) {
     nodes: (tree?.nodes || []).length,
     parent: edges.filter((e) => e.type === 'parent').length,
     spouse: edges.filter((e) => e.type === 'spouse').length,
+    sibling: edges.filter((e) => e.type === 'sibling').length,
   };
 }
 
@@ -195,7 +197,10 @@ function updateStats() {
     el.stats.textContent = '家里还没有记下亲人';
     return;
   }
-  el.stats.innerHTML = `<span class="stat"><strong>${c.nodes}</strong>位亲人</span><span class="stat"><strong>${c.parent}</strong>门亲子</span><span class="stat"><strong>${c.spouse}</strong>对夫妻</span>`;
+  const siblingStat = c.sibling
+    ? `<span class="stat"><strong>${c.sibling}</strong>门兄弟姐妹</span>`
+    : '';
+  el.stats.innerHTML = `<span class="stat"><strong>${c.nodes}</strong>位亲人</span><span class="stat"><strong>${c.parent}</strong>门亲子</span><span class="stat"><strong>${c.spouse}</strong>对夫妻</span>${siblingStat}`;
 }
 
 function setAuthed(on) {
@@ -559,15 +564,6 @@ function updateParentRoleVisibility(relation, anchor) {
   if (!need && el.addParentRole) el.addParentRole.value = '';
 }
 
-function hasKnownParent(person) {
-  return Boolean(person && (person.father_id != null || person.mother_id != null));
-}
-
-function missingParentsMessage(anchor) {
-  const name = anchor?.name ? `「${anchor.name}」` : '这位亲人';
-  return `要先给${name}记下父亲或母亲，才能把兄弟姐妹连在同一房里。`;
-}
-
 function addContextText(kinKey, anchor) {
   if (kinKey === 'first' || !anchor) {
     return '家里还没有记下亲人。先写下第一位的名字就好。';
@@ -576,7 +572,7 @@ function addContextText(kinKey, anchor) {
   if (!kin) return `给「${anchor.name}」添一位亲人。`;
   const name = `「${anchor.name}」`;
   if (kin.relation === 'sibling') {
-    return `给${name}添一位${kin.word}。会记到和${name}同一位父亲或母亲名下。`;
+    return `给${name}添一位${kin.word}。会记下你们之间的兄弟姐妹关系（不改动父母）。`;
   }
   return `给${name}添一位${kin.word}。`;
 }
@@ -752,18 +748,6 @@ function startAddForKin(kinKey) {
     showError(el.sheetError, rec ? `${base} ${recoveryMessage(rec)}` : base);
     return;
   }
-  if (kin.relation === 'sibling' && !hasKnownParent(anchor)) {
-    // Do not erase durable recovery guidance when explaining the sibling prerequisite.
-    const missing = missingParentsMessage(anchor);
-    const rec = state.recovery && recoveryScopedOk(state.recovery) ? state.recovery : null;
-    showError(
-      el.sheetError,
-      rec ? `${missing} ${recoveryMessage(rec)}` : missing,
-    );
-    el.formAdd.classList.add('hidden');
-    setKinPressed('');
-    return;
-  }
   showError(el.sheetError, '');
   showAddFormForKin(kinKey, anchor);
 }
@@ -872,6 +856,20 @@ function render() {
       .attr('d', `M${x1},${y1} L${x2},${y2}`);
   });
 
+  edges.filter((e) => e.type === 'sibling').forEach((e) => {
+    const a = positions.get(e.a);
+    const b = positions.get(e.b);
+    if (!a || !b) return;
+    const x1 = a.x + cardW / 2;
+    const y1 = a.y + 18;
+    const x2 = b.x + cardW / 2;
+    const y2 = b.y + 18;
+    const midY = Math.min(y1, y2) - 16;
+    gRoot.append('path')
+      .attr('class', 'edge-sibling')
+      .attr('d', `M${x1},${y1} Q${(x1 + x2) / 2},${midY} ${x2},${y2}`);
+  });
+
   const cards = gRoot.selectAll('g.node-card')
     .data(nodes, (d) => d.id)
     .join('g')
@@ -942,17 +940,25 @@ function relationsFromEdges(personId) {
 }
 
 function siblingsOf(personId) {
+  const byId = new Map();
   const parentIds = relationsFromEdges(personId).parents.map((p) => p.id);
-  if (parentIds.length === 0) return [];
-  const childIds = [];
-  for (const edge of state.tree?.edges || []) {
-    if (edge.type !== 'parent') continue;
-    if (!parentIds.some((id) => sameId(id, edge.from))) continue;
-    if (sameId(edge.to, personId)) continue;
-    const key = String(edge.to);
-    if (!childIds.includes(key)) childIds.push(key);
+  if (parentIds.length > 0) {
+    for (const edge of state.tree?.edges || []) {
+      if (edge.type !== 'parent') continue;
+      if (!parentIds.some((id) => sameId(id, edge.from))) continue;
+      if (sameId(edge.to, personId)) continue;
+      const person = findPerson(edge.to) || (state.tree?.nodes || []).find((n) => sameId(n.id, edge.to));
+      if (person) byId.set(String(person.id), person);
+    }
   }
-  return childIds.map((id) => findPerson(id)).filter(Boolean);
+  for (const edge of state.tree?.edges || []) {
+    if (edge.type !== 'sibling') continue;
+    if (!sameId(edge.a, personId) && !sameId(edge.b, personId)) continue;
+    const otherId = sameId(edge.a, personId) ? edge.b : edge.a;
+    const person = findPerson(otherId) || (state.tree?.nodes || []).find((n) => sameId(n.id, otherId));
+    if (person) byId.set(String(person.id), person);
+  }
+  return Array.from(byId.values());
 }
 
 
@@ -1105,26 +1111,15 @@ async function bindPerson(target, relation, anchor) {
     return;
   }
   if (relation === 'sibling') {
-    if (!hasKnownParent(liveAnchor)) {
-      throw new Error(missingParentsMessage(liveAnchor));
+    if (sameId(liveAnchor.id, liveTarget.id)) {
+      throw new Error('一个人不能认自己为兄弟姐妹。');
     }
-    const payload = {};
-    if (liveAnchor.father_id != null) {
-      ensureParentSlot(liveTarget, 'father_id', liveAnchor.father_id);
-      if (!sameId(liveTarget.father_id, liveAnchor.father_id)) {
-        payload.father_id = Number(liveAnchor.father_id);
-      }
-    }
-    if (liveAnchor.mother_id != null) {
-      ensureParentSlot(liveTarget, 'mother_id', liveAnchor.mother_id);
-      if (!sameId(liveTarget.mother_id, liveAnchor.mother_id)) {
-        payload.mother_id = Number(liveAnchor.mother_id);
-      }
-    }
-    if (Object.keys(payload).length === 0) return;
-    await api(`/persons/${liveTarget.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
+    await api('/sibling-links', {
+      method: 'POST',
+      body: JSON.stringify({
+        person_a_id: Number(liveAnchor.id),
+        person_b_id: Number(liveTarget.id),
+      }),
     });
   }
 }
@@ -1194,10 +1189,6 @@ async function submitAdd(event) {
       : findPerson(state.addIntent.anchorId || state.selectedId || state.recovery?.anchorId);
     if (!isFirst && (!kin || !anchor)) {
       showError(el.addError, '请先在树上点一位当前人，再选择要添加的关系。');
-      return;
-    }
-    if (relation === 'sibling' && !hasKnownParent(anchor)) {
-      showError(el.addError, missingParentsMessage(anchor));
       return;
     }
     let parentRole = '';

@@ -4,6 +4,33 @@
 
 ---
 
+## Binding cut — 2026-11-11 Explicit siblings (APPROVED)
+
+**Decision needed:** ~~approve explicit two-person sibling links independent of parents~~ → **APPROVED**（Boss via Master / user 2026-11-11；Cursor Auto only for eng）。
+
+**本 cut 取代 / 修订：** 2026-11-06 中「构图 edges 仅 parent|spouse」的锁定，以及前端「添兄弟姐妹必须先有已知父母并复制 parent IDs」的过时限制（工程侧曾称 R3 / sibling-parent-copy gate）。共享父母仍是**独立**的派生证据，不再是记录兄弟姐妹的唯一路径。
+
+**一句话结果：** 用户可在父母未知或不同时，为当前人显式记录对称的两人兄弟姐妹关系；图与双方详情可见；不伪造父母、不自动传播父母、不从 A–B 与 B–C 推断 A–C。
+
+### In
+- `SiblingLink`：同 tree 两人无向唯一边；API `/sibling-links`；tree JSON `type=sibling` 边（含 `link_id`）
+- UI：哥/姐/弟/妹 入口可在父母为空时姓名新建或按具体 ID 选已有人；绑定写 sibling-link，**不**复制 `father_id`/`mother_id`
+- 详情兄弟姐妹名单 = 派生（共享已知父母）∪ 显式边，按 person id 去重
+- 删除成员时级联清理其 sibling-links；保留 AC-5 有子女 → 409
+
+### Out（本 cut）
+- 兄弟姐妹解绑管理 UI、兄弟组/传递闭包、过继/继父母模型、占位人、旧关系批量回填、复杂排版/称谓引擎、年龄长幼校验
+
+### Acceptance：SIB-AC1…SIB-AC7
+见 `docs/superpowers/specs/2026-11-11-explicit-siblings-design.md` §5。Proof：API JSON + 截图（按条）。
+
+### 稳定契约摘要
+- `POST /api/v1/sibling-links` `{ person_a_id, person_b_id }` → 规范序 `a < b`；已存在则 200，新建 201；自指 422
+- Tree edge：`{ "type":"sibling", "a", "b", "link_id" }`
+- 父母 PATCH 仍只改目标人；冲突槽位拒绝静默覆盖
+
+---
+
 ## Binding cut — 2026-11-06 (APPROVED)
 
 **Decision needed:** ~~approve | reject 任一 Out 项回 In | pick unlock order~~ → **APPROVED**（Boss via Master，默认 unlock order AC-1→AC-6）。
@@ -87,15 +114,18 @@ Boss 一次通过本 cut；下列 AC 全部 PASS 且附约定 Proof；Eng 未在
 | GET | /persons/{id} | 详情 |
 | PATCH | /persons/{id} | 更新字段/父母 |
 | DELETE | /persons/{id} | 删除（本 cut：有子女则 409，须先解绑） |
-| GET | /persons/{id}/tree | 返回构图 JSON（节点+边：parent、spouse） |
+| GET | /persons/{id}/tree | 返回构图 JSON（节点+边：parent、spouse；**2026-11-11 起另含 sibling**） |
 | GET | /spouse-links | 列表 |
 | POST | /spouse-links | 创建配偶绑定 |
 | PATCH | /spouse-links/{id} | 更新起止年/注 |
 | DELETE | /spouse-links/{id} | 解除 |
+| GET | /sibling-links | 列表（2026-11-11） |
+| POST | /sibling-links | 创建显式兄弟姐妹绑定（2026-11-11；幂等） |
+| DELETE | /sibling-links/{id} | 解除（2026-11-11；本 cut UI 不做解绑管理） |
 
-构图字段语义：root_id；nodes[] 含 id,name,gender,generation,birth_year,death_year；edges[] 为 type=parent(from→to) 或 type=spouse(a,b,link_id)。
+构图字段语义：root_id；nodes[] 含 id,name,gender,generation,birth_year,death_year；edges[] 为 type=parent(from→to)、type=spouse(a,b,link_id)，以及 **type=sibling(a,b,link_id)**（2026-11-11；显式边，不由共享父母推断写入 JSON）。
 
-前端：消费 `/persons/{id}/tree`（或等价）用 D3/OrgChart 渲染；不得另起一套关系算法。
+前端：消费 `/persons/{id}/tree`（或等价）用 D3/OrgChart 渲染；不得另起一套关系算法。详情里由共享父母**派生**的兄弟姐妹展示可与显式边合并去重，但不得发明 API 未给出的显式 sibling 边。
 
 ### 5. Acceptance criteria
 
@@ -143,8 +173,9 @@ QA: pass if 不能读写他人 tree 的 persons/links（401/403/404，不得 200
 ## PM review
 
 - 活着的 SoT 路径：`docs/prd/yimai.md`（本节优先于口头/聊天补充）。
-- 开放 cut：2026-11-06（APPROVED，执行中）。
-- Eng path：local Grok Bot scaffold（no Cloud Agent per Boss）。
-- UI defaults（Boss）：单击节点只开 sheet、不换根；不做「我」标记；父母拆两个入口；配偶 start/end/note UI 全藏；tree JSON 字段名按本 cut 锁定。
+- 开放 cut：2026-11-11 Explicit siblings（APPROVED）；底层 2026-11-06 AC-1…AC-6 仍有效且不得回退。
+- Eng path：Cursor Auto only（user 2026-11-11）；设计见 `docs/superpowers/specs/2026-11-11-explicit-siblings-design.md`。
+- UI defaults（Boss）：单击节点只开 sheet、不换根；不做「我」标记；父母拆两个入口；配偶 start/end/note UI 全藏；tree JSON 字段名按 cut 锁定（含 sibling）。
+- **过时限制作废：** 「添兄弟姐妹必须先有父母并复制 parent IDs」（旧 R3 / sibling-parent-copy gate）。
 - 仓库已钉死：`owner/repo = mojunyu/yimai`（SoT：https://github.com/mojunyu/yimai/blob/main/docs/prd/yimai.md）。
 - AC-5/AC-6 Feature proof：见 `docs/qa/ac-5-6-evidence.md`（PersonAc5Test + TreeIsolationAc6Test）。
