@@ -591,14 +591,29 @@ async function testDel7FailuresAndFrozenRetry() {
     if (btn) btn.click();
     else document.querySelector('#sheet-confirm-actions button.danger-solid')?.click();
   });
-  await page.waitForFunction(() => (document.getElementById('sheet-confirm-title')?.textContent || '').includes('不确定'), { timeout: 8000 });
+  // Must wait for the POST-lost unknown dialog (有「核对」), not the earlier exists-retry「结果还不确定」.
+  await page.waitForFunction(() => {
+    const title = document.getElementById('sheet-confirm-title')?.textContent || '';
+    const body = document.getElementById('sheet-confirm-body')?.textContent || '';
+    const hasReconcile = Array.from(document.querySelectorAll('#sheet-confirm-actions button'))
+      .some((b) => b.textContent.includes('核对'));
+    return title.includes('不确定')
+      && body.includes('还没有把这次操作当作已经成功')
+      && hasReconcile
+      && (window.__yimaiDeleteCommitted || []).length >= 1;
+  }, { timeout: 10000 });
   // Terminal proof: after committed-but-lost DELETE, click 核对 under same account/tree.
   await page.evaluate(() => {
-    Array.from(document.querySelectorAll('#sheet-confirm-actions button'))
-      .find((b) => b.textContent.includes('核对'))
-      ?.click();
+    const btn = Array.from(document.querySelectorAll('#sheet-confirm-actions button'))
+      .find((b) => b.textContent.includes('核对'));
+    if (!btn) throw new Error('missing reconcile button after lost DELETE');
+    btn.click();
   });
-  await sleep(1200);
+  await page.waitForFunction(() => {
+    const hidden = document.getElementById('sheet-confirm')?.classList.contains('hidden');
+    return hidden === true;
+  }, { timeout: 10000 });
+  await sleep(400);
   const uiAfterReconcile = await sheetText();
   const paths = await page.evaluate(() => window.__yimaiDeletePaths || []);
   const committed = await page.evaluate(() => window.__yimaiDeleteCommitted || []);
