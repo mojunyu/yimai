@@ -79,8 +79,16 @@
           <div>
             <p class="eyebrow" id="sheet-kicker">家人小传</p>
             <h2 id="sheet-title">家人</h2>
+            <p id="sheet-puhao" class="sheet-puhao hidden"></p>
           </div>
           <button type="button" id="btn-close-sheet" class="ghost close-sheet">收起 <span aria-hidden="true">×</span></button>
+        </div>
+
+        <div id="sheet-confirm" class="sheet-confirm hidden" role="dialog" aria-modal="true" aria-labelledby="sheet-confirm-title" tabindex="-1" hidden>
+          <h3 id="sheet-confirm-title" class="confirm-title"></h3>
+          <div id="sheet-confirm-body" class="confirm-body"></div>
+          <p id="sheet-confirm-error" class="form-error hidden" role="alert"></p>
+          <div id="sheet-confirm-actions" class="confirm-actions sheet-actions"></div>
         </div>
 
         <div id="sheet-detail">
@@ -89,6 +97,12 @@
             <button type="button" id="btn-set-root">从TA看这棵家谱</button>
           </div>
           <p class="perspective-note">从这位亲人出发，重新展开家谱。</p>
+
+          <section class="sheet-section" id="correct-section">
+            <h3 class="form-heading">更正关系</h3>
+            <p class="section-hint">只改这一栏或这一条记录；不会删掉对方本人。</p>
+            <div id="correct-list" class="correct-list"></div>
+          </section>
 
           <section class="sheet-section" id="add-section">
             <h3 class="form-heading">添加</h3>
@@ -130,6 +144,11 @@
                 <button type="button" id="btn-cancel-add" class="ghost">先不添了</button>
               </div>
             </form>
+          </section>
+
+          <section class="sheet-section danger-zone" id="delete-section">
+            <button type="button" id="btn-delete-person" class="danger-ghost">删除此人记录</button>
+            <p class="section-hint">只去掉这一位成员的记录，不是登记去世，也不会删掉其他人。</p>
           </section>
 
           <p id="sheet-error" class="form-error hidden" role="alert"></p>

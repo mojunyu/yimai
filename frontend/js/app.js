@@ -36,6 +36,9 @@ const state = {
   saving: false,
   recovery: null,
   addIntent: { relation: '', anchorId: null, kin: '', pendingPersonId: null, parentRole: '' },
+  /** Frozen mutation target for delete/correction confirm (DEL-7). */
+  sheetOp: null,
+  confirmTrigger: null,
 };
 
 const PARTIAL_SAVE_MSG = '人已记下，关系未保存';
@@ -67,8 +70,18 @@ const el = {
   canvas: document.getElementById('tree-canvas'),
   sheet: document.getElementById('sheet'),
   sheetTitle: document.getElementById('sheet-title'),
+  sheetPuhao: document.getElementById('sheet-puhao'),
   sheetSummary: document.getElementById('sheet-summary'),
   sheetDetail: document.getElementById('sheet-detail'),
+  sheetConfirm: document.getElementById('sheet-confirm'),
+  sheetConfirmTitle: document.getElementById('sheet-confirm-title'),
+  sheetConfirmBody: document.getElementById('sheet-confirm-body'),
+  sheetConfirmError: document.getElementById('sheet-confirm-error'),
+  sheetConfirmActions: document.getElementById('sheet-confirm-actions'),
+  correctSection: document.getElementById('correct-section'),
+  correctList: document.getElementById('correct-list'),
+  deleteSection: document.getElementById('delete-section'),
+  deletePerson: document.getElementById('btn-delete-person'),
   formAdd: document.getElementById('form-add'),
   closeSheet: document.getElementById('btn-close-sheet'),
   cancelAdd: document.getElementById('btn-cancel-add'),
@@ -91,6 +104,15 @@ const el = {
   perspectiveAction: document.querySelector('.perspective-action'),
   perspectiveNote: document.querySelector('.perspective-note'),
 };
+
+function personLabel(person) {
+  if (!person) return '';
+  return `${person.name}（谱号 ${person.id}）`;
+}
+
+function emptySheetOp() {
+  return null;
+}
 
 function authHeaders() {
   return {
@@ -265,7 +287,8 @@ function fillPersonSelect(selectEl, { excludeId, emptyLabel, selectedId }) {
     if (excludeId != null && sameId(person.id, excludeId)) continue;
     const selected = sameId(person.id, selectedId) ? ' selected' : '';
     const gender = genderWord(person.gender);
-    const label = gender ? `${person.name}（${gender}）` : person.name;
+    const base = gender ? `${person.name}（${gender}）` : person.name;
+    const label = `${base} · 谱号 ${person.id}`;
     options.push(`<option value="${person.id}"${selected}>${escapeHtml(label)}</option>`);
   }
   selectEl.innerHTML = options.join('');
@@ -520,6 +543,9 @@ async function loadTree() {
   }
   state.rootId = String(state.tree.root_id);
   localStorage.setItem(ROOT_KEY, state.rootId);
+  if (state.selectedId && !findPerson(state.selectedId)) {
+    state.selectedId = null;
+  }
   render();
   if (state.selectedId && state.mode === 'detail') {
     const person = findPerson(state.selectedId);
@@ -638,7 +664,8 @@ function prepareUncertainPersonSelect(anchor) {
   for (const person of state.persons) {
     if (anchor && sameId(person.id, anchor.id)) continue;
     const gender = genderWord(person.gender);
-    const label = gender ? `${person.name}（${gender}）#${person.id}` : `${person.name}#${person.id}`;
+    const base = gender ? `${person.name}（${gender}）` : person.name;
+    const label = `${base} · 谱号 ${person.id}`;
     options.push(`<option value="${person.id}">${escapeHtml(label)}</option>`);
   }
   el.addExistingWrap.classList.remove('hidden');
@@ -711,10 +738,14 @@ function showFirstPersonForm() {
   });
   setKinPressed('');
   updateAnchorLabel(null);
+  hideConfirmLayer();
   el.sheet.classList.remove('hidden');
   el.sheetDetail.classList.remove('hidden');
   el.formAdd.classList.remove('hidden');
   el.sheetTitle.textContent = '第一位家人';
+  setPuhao(null);
+  if (el.correctSection) el.correctSection.classList.add('hidden');
+  if (el.deleteSection) el.deleteSection.classList.add('hidden');
   document.getElementById('sheet-kicker').textContent = '续写家谱';
   d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
   setFirstPersonChrome(true);
@@ -874,9 +905,10 @@ function render() {
     .data(nodes, (d) => d.id)
     .join('g')
     .attr('class', (d) => `node-card${sameId(d.id, tree.root_id) ? ' root' : ''}${sameId(d.id, state.selectedId) ? ' selected' : ''}`)
+    .attr('data-id', (d) => String(d.id))
     .attr('tabindex', 0)
     .attr('role', 'button')
-    .attr('aria-label', (d) => `${d.name}，${yearsLabel(d)}，查看小传`)
+    .attr('aria-label', (d) => `${d.name}，谱号 ${d.id}，${yearsLabel(d)}，查看小传`)
     .attr('aria-pressed', (d) => String(sameId(d.id, state.selectedId)))
     .attr('transform', (d) => {
       const p = positions.get(d.id);
@@ -924,19 +956,41 @@ function render() {
 function relationsFromEdges(personId) {
   const edges = state.tree?.edges || [];
   const nodesById = new Map((state.tree?.nodes || []).map((n) => [String(n.id), n]));
-  const parents = edges
-    .filter((e) => e.type === 'parent' && sameId(e.to, personId))
-    .map((e) => nodesById.get(String(e.from)))
-    .filter(Boolean);
+  const parentSlots = { father: null, mother: null };
+  const live = findPerson(personId);
+  if (live?.father_id != null) {
+    parentSlots.father = findPerson(live.father_id) || nodesById.get(String(live.father_id)) || null;
+  }
+  if (live?.mother_id != null) {
+    parentSlots.mother = findPerson(live.mother_id) || nodesById.get(String(live.mother_id)) || null;
+  }
+  // Fallback from edges when person list lacks slots (tree-only nodes).
+  if (!parentSlots.father || !parentSlots.mother) {
+    for (const edge of edges) {
+      if (edge.type !== 'parent' || !sameId(edge.to, personId)) continue;
+      const parent = nodesById.get(String(edge.from));
+      if (!parent) continue;
+      if (!parentSlots.father && parent.gender === 'male') parentSlots.father = parent;
+      else if (!parentSlots.mother && parent.gender === 'female') parentSlots.mother = parent;
+      else if (!parentSlots.father) parentSlots.father = parent;
+      else if (!parentSlots.mother) parentSlots.mother = parent;
+    }
+  }
+  const parents = [parentSlots.father, parentSlots.mother].filter(Boolean);
   const children = edges
     .filter((e) => e.type === 'parent' && sameId(e.from, personId))
     .map((e) => nodesById.get(String(e.to)))
     .filter(Boolean);
   const spouses = edges
     .filter((e) => e.type === 'spouse' && (sameId(e.a, personId) || sameId(e.b, personId)))
-    .map((e) => nodesById.get(String(sameId(e.a, personId) ? e.b : e.a)))
+    .map((e) => {
+      const otherId = sameId(e.a, personId) ? e.b : e.a;
+      const person = nodesById.get(String(otherId)) || findPerson(otherId);
+      if (!person) return null;
+      return { ...person, link_id: e.link_id };
+    })
     .filter(Boolean);
-  return { parents, children, spouses };
+  return { parents, parentSlots, children, spouses };
 }
 
 function siblingsOf(personId) {
@@ -948,7 +1002,13 @@ function siblingsOf(personId) {
       if (!parentIds.some((id) => sameId(id, edge.from))) continue;
       if (sameId(edge.to, personId)) continue;
       const person = findPerson(edge.to) || (state.tree?.nodes || []).find((n) => sameId(n.id, edge.to));
-      if (person) byId.set(String(person.id), person);
+      if (!person) continue;
+      const prev = byId.get(String(person.id));
+      byId.set(String(person.id), {
+        ...person,
+        source: prev?.source === 'explicit' || prev?.source === 'both' ? 'both' : 'inferred',
+        link_id: prev?.link_id ?? null,
+      });
     }
   }
   for (const edge of state.tree?.edges || []) {
@@ -956,11 +1016,611 @@ function siblingsOf(personId) {
     if (!sameId(edge.a, personId) && !sameId(edge.b, personId)) continue;
     const otherId = sameId(edge.a, personId) ? edge.b : edge.a;
     const person = findPerson(otherId) || (state.tree?.nodes || []).find((n) => sameId(n.id, otherId));
-    if (person) byId.set(String(person.id), person);
+    if (!person) continue;
+    const prev = byId.get(String(person.id));
+    const inferred = prev?.source === 'inferred' || prev?.source === 'both';
+    byId.set(String(person.id), {
+      ...person,
+      source: inferred ? 'both' : 'explicit',
+      link_id: edge.link_id,
+    });
   }
   return Array.from(byId.values());
 }
 
+function setPuhao(person) {
+  if (!el.sheetPuhao) return;
+  if (!person?.id) {
+    el.sheetPuhao.textContent = '';
+    el.sheetPuhao.classList.add('hidden');
+    return;
+  }
+  el.sheetPuhao.textContent = `谱号 ${person.id}`;
+  el.sheetPuhao.classList.remove('hidden');
+}
+
+function hideConfirmLayer() {
+  if (!el.sheetConfirm) return;
+  el.sheetConfirm.classList.add('hidden');
+  el.sheetConfirm.hidden = true;
+  el.sheetConfirm.removeAttribute('aria-busy');
+  showError(el.sheetConfirmError, '');
+  if (el.sheetDetail) el.sheetDetail.classList.remove('hidden');
+  state.sheetOp = emptySheetOp();
+}
+
+function focusAfterConfirmClose() {
+  const trigger = state.confirmTrigger;
+  state.confirmTrigger = null;
+  if (trigger && document.body.contains(trigger) && !trigger.disabled) {
+    trigger.focus();
+    return;
+  }
+  const selected = findPerson(state.selectedId);
+  if (selected) {
+    const card = el.canvas?.querySelector(`.node-card[data-id="${selected.id}"]`);
+    if (card) {
+      card.focus();
+      return;
+    }
+  }
+  const root = findPerson(state.rootId);
+  if (root) {
+    const card = el.canvas?.querySelector(`.node-card[data-id="${root.id}"]`);
+    if (card) {
+      card.focus();
+      return;
+    }
+  }
+  el.add?.focus();
+}
+
+function renderConfirmActions(buttons) {
+  el.sheetConfirmActions.innerHTML = '';
+  for (const spec of buttons) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = spec.label;
+    if (spec.className) btn.className = spec.className;
+    if (spec.primary) btn.dataset.confirmPrimary = '1';
+    if (spec.cancel) btn.dataset.confirmCancel = '1';
+    btn.disabled = Boolean(spec.disabled);
+    btn.addEventListener('click', () => {
+      if (typeof spec.onClick === 'function') spec.onClick();
+    });
+    el.sheetConfirmActions.appendChild(btn);
+  }
+}
+
+function openConfirmLayer({ title, bodyHtml, actions }) {
+  if (!el.sheetConfirm) return;
+  el.sheetConfirmTitle.textContent = title;
+  el.sheetConfirmBody.innerHTML = bodyHtml;
+  showError(el.sheetConfirmError, '');
+  renderConfirmActions(actions);
+  el.sheetDetail.classList.add('hidden');
+  el.sheetConfirm.classList.remove('hidden');
+  el.sheetConfirm.hidden = false;
+  el.sheet.classList.remove('hidden');
+  const focusable = el.sheetConfirm.querySelector('button:not([disabled]), [href], input, select, textarea');
+  (focusable || el.sheetConfirm).focus?.();
+}
+
+function setConfirmBusy(on) {
+  if (!el.sheetConfirm) return;
+  el.sheetConfirm.setAttribute('aria-busy', on ? 'true' : 'false');
+  el.sheetConfirm.querySelectorAll('button').forEach((btn) => {
+    btn.disabled = on;
+    btn.classList.toggle('is-busy', on && btn.dataset.confirmPrimary === '1');
+  });
+}
+
+function siblingSourceNote(sib) {
+  if (sib.source === 'explicit') return '手动添加的兄弟姐妹关系记录';
+  if (sib.source === 'inferred') return '因共同父母显示为兄弟姐妹';
+  if (sib.source === 'both') return '手动记录；也因共同父母显示为兄弟姐妹';
+  return '';
+}
+
+function renderCorrectionList(node) {
+  if (!el.correctList) return;
+  const rel = relationsFromEdges(node.id);
+  const siblings = siblingsOf(node.id);
+  const rows = [];
+
+  const pushRow = ({ role, person, note, actionLabel, action }) => {
+    rows.push({ role, person, note, actionLabel, action });
+  };
+
+  if (rel.parentSlots.father) {
+    pushRow({
+      role: '父亲',
+      person: rel.parentSlots.father,
+      actionLabel: '清空父亲栏',
+      action: () => beginClearParent(node, 'father_id', rel.parentSlots.father),
+    });
+  }
+  if (rel.parentSlots.mother) {
+    pushRow({
+      role: '母亲',
+      person: rel.parentSlots.mother,
+      actionLabel: '清空母亲栏',
+      action: () => beginClearParent(node, 'mother_id', rel.parentSlots.mother),
+    });
+  }
+  for (const spouse of rel.spouses) {
+    pushRow({
+      role: '配偶',
+      person: spouse,
+      note: '家谱中的夫妻关系记录',
+      actionLabel: '解除这段关系记录',
+      action: () => beginUnlinkSpouse(node, spouse),
+    });
+  }
+  for (const sib of siblings) {
+    const canUnlink = sib.link_id != null && (sib.source === 'explicit' || sib.source === 'both');
+    pushRow({
+      role: '兄弟姐妹',
+      person: sib,
+      note: siblingSourceNote(sib),
+      actionLabel: canUnlink ? '移除手动添加的兄弟姐妹关系记录' : null,
+      action: canUnlink ? () => beginUnlinkSibling(node, sib) : null,
+    });
+  }
+  for (const child of rel.children) {
+    pushRow({
+      role: '子女',
+      person: child,
+      note: '若父母记错，请打开子女详情更正；不要删除真实子女。',
+      actionLabel: '打开并更正记录',
+      action: () => openSheet(child),
+    });
+  }
+
+  if (rows.length === 0) {
+    el.correctList.innerHTML = '<p class="section-hint">这位还没有可更正的父母、配偶或兄弟姐妹记录。</p>';
+    return;
+  }
+
+  el.correctList.innerHTML = '';
+  for (const row of rows) {
+    const wrap = document.createElement('div');
+    wrap.className = 'correct-row';
+    const meta = document.createElement('div');
+    meta.className = 'correct-meta';
+    meta.innerHTML = `<strong>${escapeHtml(row.role)}</strong> · ${escapeHtml(row.person.name)}`
+      + `<span class="puhao">谱号 ${escapeHtml(String(row.person.id))}</span>`
+      + (row.note ? `<span class="correct-note">${escapeHtml(row.note)}</span>` : '');
+    wrap.appendChild(meta);
+    if (row.actionLabel && row.action) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ghost';
+      btn.textContent = row.actionLabel;
+      btn.addEventListener('click', (event) => {
+        state.confirmTrigger = event.currentTarget;
+        row.action();
+      });
+      wrap.appendChild(btn);
+    }
+    el.correctList.appendChild(wrap);
+  }
+}
+
+function beginClearParent(subject, slot, counterpart) {
+  const isFather = slot === 'father_id';
+  const title = isFather ? '更正父亲记录' : '更正母亲记录';
+  const slotWord = isFather ? '父亲栏' : '母亲栏';
+  const confirmLabel = isFather ? '从父亲栏去掉' : '从母亲栏去掉';
+  state.sheetOp = {
+    op: isFather ? 'clear_father' : 'clear_mother',
+    personId: subject.id,
+    name: subject.name,
+    slot,
+    counterpartId: counterpart.id,
+    counterpartName: counterpart.name,
+    phase: 'confirm',
+  };
+  openConfirmLayer({
+    title,
+    bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel(subject))}</p>`
+      + `<p>从「${escapeHtml(subject.name)}」（谱号 ${escapeHtml(String(subject.id))}）的${slotWord}去掉「${escapeHtml(counterpart.name)}」（谱号 ${escapeHtml(String(counterpart.id))}）。两位的资料都会保留。</p>`,
+    actions: [
+      { label: '取消', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
+      {
+        label: confirmLabel,
+        className: 'outline-action',
+        primary: true,
+        onClick: () => submitSheetOp(),
+      },
+    ],
+  });
+}
+
+function beginUnlinkSpouse(subject, spouse) {
+  state.sheetOp = {
+    op: 'unlink_spouse',
+    personId: subject.id,
+    name: subject.name,
+    counterpartId: spouse.id,
+    counterpartName: spouse.name,
+    linkId: spouse.link_id,
+    phase: 'confirm',
+  };
+  openConfirmLayer({
+    title: '解除家谱中的夫妻关系记录',
+    bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel(subject))} 与 ${escapeHtml(personLabel(spouse))}</p>`
+      + '<p>只解除这两位在家谱中的这段关系记录。两位的资料都会保留。</p>',
+    actions: [
+      { label: '取消', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
+      {
+        label: '解除这段关系记录',
+        className: 'outline-action',
+        primary: true,
+        onClick: () => submitSheetOp(),
+      },
+    ],
+  });
+}
+
+function beginUnlinkSibling(subject, sibling) {
+  state.sheetOp = {
+    op: 'unlink_sibling',
+    personId: subject.id,
+    name: subject.name,
+    counterpartId: sibling.id,
+    counterpartName: sibling.name,
+    linkId: sibling.link_id,
+    phase: 'confirm',
+  };
+  openConfirmLayer({
+    title: '移除手动添加的兄弟姐妹关系记录',
+    bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel(subject))} 与 ${escapeHtml(personLabel(sibling))}</p>`
+      + '<p>只移除这笔手动添加的兄弟姐妹关系记录。两位的资料和父母记录都不变。若双方仍有共同父母，家谱上仍会继续显示为兄弟姐妹。</p>',
+    actions: [
+      { label: '取消', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
+      {
+        label: '移除这条记录',
+        className: 'outline-action',
+        primary: true,
+        onClick: () => submitSheetOp(),
+      },
+    ],
+  });
+}
+
+function beginDeletePerson(subject, trigger) {
+  state.confirmTrigger = trigger || el.deletePerson;
+  state.sheetOp = {
+    op: 'delete_person',
+    personId: subject.id,
+    name: subject.name,
+    phase: 'confirm',
+  };
+  openConfirmLayer({
+    title: `删除『${subject.name}』？`,
+    bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel(subject))}</p>`
+      + '<p>只删除这位成员及其与他人的关系记录，其他成员仍会保留。不会删除整支，也不是登记去世。</p>',
+    actions: [
+      { label: '取消', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
+      {
+        label: '确认删除此人',
+        className: 'danger-solid',
+        primary: true,
+        onClick: () => submitSheetOp(),
+      },
+    ],
+  });
+}
+
+function cancelConfirm() {
+  const subjectId = state.sheetOp?.personId;
+  hideConfirmLayer();
+  const subject = findPerson(subjectId) || findPerson(state.selectedId);
+  if (subject) openSheet(subject);
+  else focusAfterConfirmClose();
+}
+
+async function reconcilePersonExists(personId) {
+  if (!state.token || personId == null) {
+    return { status: 'unknown', reason: 'no_authority' };
+  }
+  try {
+    await api(`/persons/${personId}`);
+    return { status: 'exists' };
+  } catch (err) {
+    const code = Number(err?.status || 0);
+    if (code === 404) {
+      // Ambiguous single 404 is not proof by itself; confirm via scoped list.
+      try {
+        await loadPersons();
+        const still = state.persons.some((p) => sameId(p.id, personId));
+        if (!still && state.treeId && state.userId) {
+          return { status: 'absent_confirmed' };
+        }
+        return { status: 'unknown', reason: 'ambiguous_404' };
+      } catch (_) {
+        return { status: 'unknown', reason: 'list_failed' };
+      }
+    }
+    if (code === 401 || code === 403) {
+      return { status: 'unknown', reason: 'auth' };
+    }
+    if (err?.uncertain) {
+      return { status: 'unknown', reason: 'uncertain' };
+    }
+    return { status: 'unknown', reason: 'error' };
+  }
+}
+
+async function reconcileRelationship(op) {
+  if (!op) return { status: 'unknown' };
+  if (op.op === 'clear_father' || op.op === 'clear_mother') {
+    try {
+      const person = await api(`/persons/${op.personId}`);
+      const slot = op.slot;
+      const cleared = person[slot] == null || person[slot] === '';
+      return { status: cleared ? 'applied' : 'pending', person };
+    } catch (err) {
+      if (Number(err?.status) === 404) return { status: 'unknown', reason: 'person_missing' };
+      return { status: 'unknown', reason: err?.uncertain ? 'uncertain' : 'error' };
+    }
+  }
+  if (op.op === 'unlink_spouse' || op.op === 'unlink_sibling') {
+    const path = op.op === 'unlink_spouse' ? '/spouse-links' : '/sibling-links';
+    try {
+      const list = await api(path);
+      const rows = list?.data || [];
+      const still = rows.some((row) => sameId(row.id, op.linkId));
+      return { status: still ? 'pending' : 'applied' };
+    } catch (err) {
+      return { status: 'unknown', reason: err?.uncertain ? 'uncertain' : 'error' };
+    }
+  }
+  if (op.op === 'delete_person') {
+    return reconcilePersonExists(op.personId);
+  }
+  return { status: 'unknown' };
+}
+
+function showUnknownResult(op, detailMessage) {
+  state.sheetOp = { ...op, phase: 'unknown' };
+  openConfirmLayer({
+    title: '结果还不确定',
+    bodyHtml: `<p>还没有把这次操作当作已经成功。正在按发出请求时的原谱号 ${escapeHtml(String(op.personId))} 核对「${escapeHtml(op.name)}」。请稍候，不要重复点击。</p>`
+      + (detailMessage ? `<p>${escapeHtml(detailMessage)}</p>` : ''),
+    actions: [
+      {
+        label: '先核对原谱号',
+        className: 'secondary',
+        primary: true,
+        onClick: () => reconcileAndContinue(),
+      },
+      { label: '关闭', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
+    ],
+  });
+}
+
+function showDeleteBlocked409(op, body) {
+  state.sheetOp = { ...op, phase: 'rejected' };
+  const children = Array.isArray(body?.children) ? body.children : [];
+  const listHtml = children.length
+    ? `<div class="child-correct-list">${children.map((c) => (
+      `<button type="button" class="ghost" data-open-child="${escapeHtml(String(c.id))}">`
+      + `${escapeHtml(c.name)}（谱号 ${escapeHtml(String(c.id))}）· 打开并更正记录</button>`
+    )).join('')}</div>`
+    : '<p>请到相关子女详情中清空误认的父或母栏后，再对原谱号重试。</p>';
+  openConfirmLayer({
+    title: `还不能删除『${op.name}』`,
+    bodyHtml: `<p class="confirm-identity">${escapeHtml(personLabel({ name: op.name, id: op.personId }))}</p>`
+      + '<p>还有成员将这位记为父亲或母亲，若关系记错请更正对应成员记录，无需删除这些成员。还有子女记在 TA 名下，所以不能删人。</p>'
+      + listHtml,
+    actions: [
+      { label: '关闭', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
+      {
+        label: '仍针对原谱号重试删除',
+        className: 'danger-solid',
+        primary: true,
+        onClick: () => {
+          const frozen = state.sheetOp;
+          if (!frozen || !sameId(frozen.personId, op.personId)) return;
+          beginDeletePerson({ id: frozen.personId, name: frozen.name }, state.confirmTrigger);
+        },
+      },
+    ],
+  });
+  el.sheetConfirmBody.querySelectorAll('[data-open-child]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const childId = btn.getAttribute('data-open-child');
+      const child = findPerson(childId);
+      hideConfirmLayer();
+      if (child) openSheet(child);
+    });
+  });
+}
+
+async function afterSuccessfulDelete(op) {
+  const deletedId = op.personId;
+  const wasRoot = sameId(state.rootId, deletedId);
+  const wasSelected = sameId(state.selectedId, deletedId);
+
+  if (state.recovery) {
+    const pendingHit = sameId(state.recovery.pendingPersonId, deletedId);
+    const anchorHit = sameId(state.recovery.anchorId, deletedId);
+    if (pendingHit || anchorHit) clearRecovery();
+  }
+
+  hideConfirmLayer();
+  try {
+    await loadPersons();
+  } catch (_) { /* continue with local sync */ }
+
+  if (state.persons.length === 0) {
+    state.selectedId = null;
+    state.rootId = '';
+    localStorage.removeItem(ROOT_KEY);
+    state.tree = { root_id: null, nodes: [], edges: [] };
+    render();
+    showFirstPersonForm();
+    el.add?.focus();
+    return;
+  }
+
+  if (wasRoot) {
+    syncRootWithPersons();
+    state.selectedId = state.rootId;
+  } else if (wasSelected) {
+    state.selectedId = null;
+  }
+
+  try {
+    await loadTree();
+  } catch (err) {
+    showError(el.sheetError, '删除已成功，但画面没有刷新成功。请点「重新载入」，不会再次删除。');
+    focusAfterConfirmClose();
+    return;
+  }
+
+  if (wasRoot) {
+    const survivor = findPerson(state.rootId);
+    if (survivor) {
+      openSheet(survivor);
+      showError(el.sheetError, `当前视角已改为「${survivor.name}」（谱号 ${survivor.id}）。`);
+    }
+  } else if (wasSelected) {
+    closeSheet();
+  } else {
+    const keep = findPerson(state.selectedId);
+    if (keep) openSheet(keep);
+  }
+  focusAfterConfirmClose();
+}
+
+async function afterSuccessfulCorrection(op) {
+  const subjectId = op.personId;
+  hideConfirmLayer();
+  try {
+    await loadTree();
+  } catch (err) {
+    showError(el.sheetError, '关系已更正，但画面没有刷新成功。请点「重新载入」，不要重复提交。');
+    focusAfterConfirmClose();
+    return;
+  }
+  const subject = findPerson(subjectId);
+  if (subject) {
+    openSheet(subject);
+    if (op.op === 'unlink_sibling') {
+      const still = siblingsOf(subjectId).find((s) => sameId(s.id, op.counterpartId));
+      if (still && (still.source === 'inferred' || still.source === 'both')) {
+        showError(el.sheetError, '手动添加的兄弟姐妹关系记录已移除。因共同父母仍显示为兄弟姐妹。');
+      }
+    }
+  }
+  focusAfterConfirmClose();
+}
+
+async function reconcileAndContinue() {
+  const op = state.sheetOp;
+  if (!op) return;
+  setConfirmBusy(true);
+  try {
+    const result = await reconcileRelationship(op);
+    if (op.op === 'delete_person') {
+      if (result.status === 'absent_confirmed') {
+        await afterSuccessfulDelete(op);
+        return;
+      }
+      if (result.status === 'exists') {
+        state.sheetOp = { ...op, phase: 'confirm' };
+        showError(el.sheetConfirmError, `核对后，谱号 ${op.personId} 仍在家谱中。若要再次操作，仍针对这一谱号。`);
+        openConfirmLayer({
+          title: '结果还不确定',
+          bodyHtml: `<p>核对后，谱号 ${escapeHtml(String(op.personId))} 仍在家谱中。若要再次操作，仍针对这一谱号。</p>`,
+          actions: [
+            { label: '关闭', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
+            {
+              label: '仍删除原谱号',
+              className: 'danger-solid',
+              primary: true,
+              onClick: () => submitSheetOp(),
+            },
+          ],
+        });
+        return;
+      }
+      showUnknownResult(op, '认证失败、权限不足或单次含义不明的结果，不能当作已删除。');
+      return;
+    }
+    if (result.status === 'applied') {
+      await afterSuccessfulCorrection(op);
+      return;
+    }
+    if (result.status === 'pending') {
+      showError(el.sheetConfirmError, '核对后，原关系仍在。可对同一目标重试。');
+      setConfirmBusy(false);
+      return;
+    }
+    showUnknownResult(op, '还不能确认关系是否已更正。');
+  } finally {
+    setConfirmBusy(false);
+  }
+}
+
+async function submitSheetOp() {
+  const op = state.sheetOp;
+  if (!op || op.phase === 'submitting') return;
+  // Freeze snapshot at send time.
+  const frozen = { ...op, phase: 'submitting' };
+  state.sheetOp = frozen;
+  setConfirmBusy(true);
+  showError(el.sheetConfirmError, '');
+
+  try {
+    if (frozen.op === 'delete_person') {
+      await api(`/persons/${frozen.personId}`, { method: 'DELETE' });
+      await afterSuccessfulDelete(frozen);
+      return;
+    }
+    if (frozen.op === 'clear_father' || frozen.op === 'clear_mother') {
+      await api(`/persons/${frozen.personId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ [frozen.slot]: null }),
+      });
+      await afterSuccessfulCorrection(frozen);
+      return;
+    }
+    if (frozen.op === 'unlink_spouse') {
+      await api(`/spouse-links/${frozen.linkId}`, { method: 'DELETE' });
+      await afterSuccessfulCorrection(frozen);
+      return;
+    }
+    if (frozen.op === 'unlink_sibling') {
+      await api(`/sibling-links/${frozen.linkId}`, { method: 'DELETE' });
+      await afterSuccessfulCorrection(frozen);
+      return;
+    }
+  } catch (err) {
+    if (frozen.op === 'delete_person' && Number(err?.status) === 409) {
+      showDeleteBlocked409(frozen, err.body);
+      return;
+    }
+    if (isDefiniteClientRejection(err) && Number(err?.status) !== 404) {
+      state.sheetOp = { ...frozen, phase: 'rejected' };
+      showError(el.sheetConfirmError, err.message || '没有保存成功，请再试一次。');
+      setConfirmBusy(false);
+      el.sheetConfirm.querySelectorAll('button').forEach((btn) => {
+        btn.disabled = false;
+        btn.classList.remove('is-busy');
+      });
+      return;
+    }
+    // Network / timeout / parse / ambiguous 404 → unknown; do not claim success.
+    showUnknownResult(frozen, err?.message || '');
+    return;
+  } finally {
+    setConfirmBusy(false);
+  }
+}
 
 function openSheet(node) {
   const personChanged = state.mode !== 'detail' || !sameId(state.selectedId, node.id);
@@ -973,6 +1633,7 @@ function openSheet(node) {
     pendingPersonId: pendingId,
     parentRole: state.recovery?.parentRole || '',
   });
+  hideConfirmLayer();
   el.sheetDetail.classList.remove('hidden');
   el.sheet.classList.remove('hidden');
   el.formAdd.classList.add('hidden');
@@ -980,6 +1641,7 @@ function openSheet(node) {
   setKinPressed('');
   updateAnchorLabel(node);
   el.sheetTitle.textContent = node.name;
+  setPuhao(node);
   document.getElementById('sheet-kicker').textContent = '家人小传';
   d3.select(el.canvas).selectAll('.node-card')
     .classed('selected', (d) => sameId(d.id, node.id))
@@ -1000,6 +1662,9 @@ function openSheet(node) {
   const childLine = rel.children.length ? `子女有${namesOf(rel.children)}。` : '子女还没有记下。';
   el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>`;
   el.setRoot.dataset.personId = String(node.id);
+  renderCorrectionList(node);
+  if (el.deleteSection) el.deleteSection.classList.remove('hidden');
+  if (el.correctSection) el.correctSection.classList.remove('hidden');
   if (personChanged) el.sheet.scrollTop = 0;
   showRecoveryGuidance();
 }
@@ -1012,10 +1677,12 @@ function closeSheet() {
     pendingPersonId: state.recovery?.pendingPersonId ?? null,
     parentRole: state.recovery?.parentRole || '',
   });
+  hideConfirmLayer();
   el.formAdd.classList.add('hidden');
   setKinPressed('');
   setFirstPersonChrome(false);
   updateAnchorLabel(null);
+  setPuhao(null);
   showError(el.addError, '');
   showError(el.sheetError, '');
   if (wasFirst || !findPerson(state.selectedId)) {
@@ -1505,6 +2172,11 @@ el.add.addEventListener('click', onToolbarAdd);
 el.cancelAdd.addEventListener('click', cancelAdd);
 el.closeSheet.addEventListener('click', closeSheet);
 el.setRoot.addEventListener('click', () => setAsRoot().catch((e) => alert(e.message)));
+el.deletePerson?.addEventListener('click', (event) => {
+  const person = findPerson(state.selectedId);
+  if (!person) return;
+  beginDeletePerson(person, event.currentTarget);
+});
 el.kinGrid.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-kin]');
   if (!button) return;
@@ -1516,13 +2188,35 @@ el.addExisting?.addEventListener('change', () => {
   el.addName.required = !usingExisting;
   if (usingExisting) {
     const label = el.addExisting.selectedOptions[0]?.textContent || '';
-    el.addName.value = label.split('（')[0].split('#')[0] || el.addName.value;
+    el.addName.value = label.split('（')[0].split('·')[0].split('#')[0].trim() || el.addName.value;
   }
 });
 el.addParentRole?.addEventListener('change', () => {
   state.addIntent.parentRole = el.addParentRole.value || '';
 });
 el.formAdd.addEventListener('submit', (event) => submitAdd(event));
+document.addEventListener('keydown', (event) => {
+  if (!el.sheetConfirm || el.sheetConfirm.classList.contains('hidden')) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    cancelConfirm();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusables = Array.from(
+    el.sheetConfirm.querySelectorAll('button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+  ).filter((node) => !node.hasAttribute('disabled') && node.offsetParent !== null);
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
 // The paper also changes size when the biography opens or closes.
 new ResizeObserver(() => render()).observe(el.canvas.parentElement);
 
