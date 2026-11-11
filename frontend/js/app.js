@@ -38,6 +38,8 @@ const state = {
   addIntent: { relation: '', anchorId: null, kin: '', pendingPersonId: null, parentRole: '' },
   /** Frozen mutation target for delete/correction confirm (DEL-7). */
   sheetOp: null,
+  /** Monotonic generation so in-flight awaits cannot apply after login/invalidate. */
+  sheetOpGen: 0,
   confirmTrigger: null,
 };
 
@@ -137,6 +139,29 @@ function authorityMatches(op) {
   return sameId(op.userId, state.userId) && sameId(op.treeId, state.treeId);
 }
 
+/**
+ * Generation+identity still active (works after hideConfirmLayer clears sheetOp).
+ * Login/invalidate bumps sheetOpGen so in-flight awaits fail this check.
+ */
+function frozenAuthorityStillActive(frozen) {
+  if (!frozen || frozen.opGen == null) return false;
+  if (frozen.opGen !== state.sheetOpGen) return false;
+  return authorityMatches(frozen);
+}
+
+/**
+ * Before applying success/failure UI from an in-flight submit: same generation,
+ * same sheetOp ownership, and same account/tree as when the request was sent.
+ */
+function sheetOpStillCurrent(frozen) {
+  if (!frozenAuthorityStillActive(frozen)) return false;
+  const cur = state.sheetOp;
+  if (!cur || cur.invalidated) return false;
+  if (cur.opGen !== frozen.opGen) return false;
+  if (cur.op !== frozen.op || !sameId(cur.personId, frozen.personId)) return false;
+  return true;
+}
+
 function userFacingOpError(message) {
   const text = String(message || '').trim();
   if (!text) return '结果还不确定，请按发出请求时的原谱号核对后再试。';
@@ -147,6 +172,8 @@ function userFacingOpError(message) {
 }
 
 function invalidateSheetOpForAuthChange(reason = 'identity_changed') {
+  // Bump generation first so any in-flight submitSheetOp await cannot pass sheetOpStillCurrent.
+  state.sheetOpGen = (state.sheetOpGen || 0) + 1;
   if (!state.sheetOp) {
     hideConfirmLayer();
     return;
@@ -1131,30 +1158,38 @@ function hideConfirmLayer() {
   state.sheetOp = emptySheetOp();
 }
 
+function isFocusableLiveTarget(node) {
+  if (!node || !document.body.contains(node)) return false;
+  if (node.disabled) return false;
+  const rects = typeof node.getClientRects === 'function' ? node.getClientRects() : [];
+  return rects.length > 0;
+}
+
 function focusAfterConfirmClose() {
   const trigger = state.confirmTrigger;
   state.confirmTrigger = null;
-  if (trigger && document.body.contains(trigger) && !trigger.disabled) {
-    trigger.focus();
-    return;
-  }
+  const tryFocus = (node) => {
+    if (!isFocusableLiveTarget(node)) return false;
+    node.focus?.();
+    return document.activeElement === node;
+  };
+  if (tryFocus(trigger)) return;
   const selected = findPerson(state.selectedId);
   if (selected) {
     const card = el.canvas?.querySelector(`.node-card[data-id="${selected.id}"]`);
-    if (card) {
-      card.focus();
-      return;
-    }
+    if (tryFocus(card)) return;
   }
   const root = findPerson(state.rootId);
   if (root) {
     const card = el.canvas?.querySelector(`.node-card[data-id="${root.id}"]`);
-    if (card) {
-      card.focus();
-      return;
-    }
+    if (tryFocus(card)) return;
   }
-  el.add?.focus();
+  if (tryFocus(el.add)) return;
+  // Never leave focus on body / detached deleted controls.
+  const active = document.activeElement;
+  if (!active || active === document.body || !document.body.contains(active)) {
+    el.add?.focus?.();
+  }
 }
 
 function renderConfirmActions(buttons) {
@@ -1552,6 +1587,7 @@ function showDeleteBlocked409(op, body) {
 }
 
 async function afterSuccessfulDelete(op) {
+  if (!frozenAuthorityStillActive(op)) return;
   const deletedId = op.personId;
   const wasRoot = sameId(state.rootId, deletedId);
   const wasSelected = sameId(state.selectedId, deletedId);
@@ -1566,6 +1602,7 @@ async function afterSuccessfulDelete(op) {
   try {
     await loadPersons();
   } catch (_) { /* continue with local sync */ }
+  if (!frozenAuthorityStillActive(op)) return;
 
   if (state.persons.length === 0) {
     state.selectedId = null;
@@ -1588,10 +1625,12 @@ async function afterSuccessfulDelete(op) {
   try {
     await loadTree();
   } catch (err) {
+    if (!frozenAuthorityStillActive(op)) return;
     showError(el.sheetError, '删除已成功，但画面没有刷新成功。请点「重新载入」，不会再次删除。');
     focusAfterConfirmClose();
     return;
   }
+  if (!frozenAuthorityStillActive(op)) return;
 
   if (wasRoot) {
     const survivor = findPerson(state.rootId);
@@ -1609,15 +1648,18 @@ async function afterSuccessfulDelete(op) {
 }
 
 async function afterSuccessfulCorrection(op) {
+  if (!frozenAuthorityStillActive(op)) return;
   const subjectId = op.personId;
   hideConfirmLayer();
   try {
     await loadTree();
   } catch (err) {
+    if (!frozenAuthorityStillActive(op)) return;
     showError(el.sheetError, '关系已更正，但画面没有刷新成功。请点「重新载入」，不要重复提交。');
     focusAfterConfirmClose();
     return;
   }
+  if (!frozenAuthorityStillActive(op)) return;
   const subject = findPerson(subjectId);
   if (subject) {
     openSheet(subject);
@@ -1695,12 +1737,14 @@ async function submitSheetOp() {
     showUnknownResult(op, '当前登录账户或家谱已变更，不会发出针对其他人的写入。');
     return;
   }
-  // Freeze person/link/slot and original account/tree at send time.
+  // Freeze person/link/slot and original account/tree + generation at send time.
+  state.sheetOpGen = (state.sheetOpGen || 0) + 1;
   const frozen = withFrozenAuthority({
     ...op,
     userId: op.userId,
     treeId: op.treeId,
     phase: 'submitting',
+    opGen: state.sheetOpGen,
   });
   // Keep the initiating authority even if currentAuthority drifted mid-dialog.
   frozen.userId = op.userId;
@@ -1712,6 +1756,7 @@ async function submitSheetOp() {
   try {
     if (frozen.op === 'delete_person') {
       await api(`/persons/${frozen.personId}`, { method: 'DELETE' });
+      if (!sheetOpStillCurrent(frozen)) return;
       await afterSuccessfulDelete(frozen);
       return;
     }
@@ -1720,20 +1765,25 @@ async function submitSheetOp() {
         method: 'PATCH',
         body: JSON.stringify({ [frozen.slot]: null }),
       });
+      if (!sheetOpStillCurrent(frozen)) return;
       await afterSuccessfulCorrection(frozen);
       return;
     }
     if (frozen.op === 'unlink_spouse') {
       await api(`/spouse-links/${frozen.linkId}`, { method: 'DELETE' });
+      if (!sheetOpStillCurrent(frozen)) return;
       await afterSuccessfulCorrection(frozen);
       return;
     }
     if (frozen.op === 'unlink_sibling') {
       await api(`/sibling-links/${frozen.linkId}`, { method: 'DELETE' });
+      if (!sheetOpStillCurrent(frozen)) return;
       await afterSuccessfulCorrection(frozen);
       return;
     }
   } catch (err) {
+    // Stale after await: login/invalidate already owns the session — no UI reopen / refresh.
+    if (!sheetOpStillCurrent(frozen)) return;
     if (frozen.op === 'delete_person' && Number(err?.status) === 409) {
       showDeleteBlocked409(frozen, err.body);
       return;
@@ -1752,7 +1802,7 @@ async function submitSheetOp() {
     showUnknownResult(frozen, userFacingOpError(err?.message || ''));
     return;
   } finally {
-    setConfirmBusy(false);
+    if (sheetOpStillCurrent(frozen)) setConfirmBusy(false);
   }
 }
 

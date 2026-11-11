@@ -223,6 +223,7 @@ button.danger-ghost:hover:not(:disabled) {
   background: var(--accent-soft);
   border-color: var(--accent-hover);
 }
+/* Confirm: body scrolls; actions are a non-overlapping flex sibling (not sticky-over-content). */
 .sheet-confirm {
   display: flex;
   flex-direction: column;
@@ -230,11 +231,10 @@ button.danger-ghost:hover:not(:disabled) {
   flex: 1 1 auto;
   min-height: 0;
   max-height: 100%;
-  overflow: auto;
-  padding: 0 0 8px;
+  overflow: hidden;
+  padding: 0;
   margin: 0;
   border-bottom: 0;
-  -webkit-overflow-scrolling: touch;
 }
 .sheet-confirm .confirm-title {
   margin: 0;
@@ -252,6 +252,9 @@ button.danger-ghost:hover:not(:disabled) {
   overflow-wrap: anywhere;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
 }
 .sheet-confirm .confirm-identity { margin: 0 0 10px; font-family: var(--serif); }
 .sheet-confirm .confirm-actions {
@@ -259,12 +262,11 @@ button.danger-ghost:hover:not(:disabled) {
   flex-direction: column;
   gap: 10px;
   flex: 0 0 auto;
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  margin-top: auto;
+  position: static;
+  z-index: auto;
+  margin-top: 0;
   padding: 12px 0 4px;
-  background: linear-gradient(180deg, #fffdf800 0%, var(--panel) 28%, var(--panel) 100%);
+  background: var(--panel);
   border-top: 1px solid var(--line);
 }
 .sheet-confirm .confirm-actions button { width: 100%; }
@@ -391,16 +393,43 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
   .sheet { flex: 1 1 auto; flex-basis: auto; width: 100%; max-width: none; border-left: 0; border-top: 1px solid var(--line); padding: 22px; }
   .canvas-heading > span:last-child { display: none; }
   .legend { gap: 12px; flex-wrap: wrap; }
-  /* Confirm must be viewport-bounded with internal scroll; do not leave title stranded under the canvas. */
-  .layout:has(.sheet.confirm-open) .canvas-wrap {
-    flex: 0 1 18vh;
+  /*
+   * Confirm open: sheet owns the layout containing block.
+   * Root cause of VIS-02: page-footer + residual canvas competed with the sheet,
+   * so footer text painted through cancel/actions and body was starved.
+   * Hide page-footer and collapse canvas while confirm is open; body scrolls
+   * above solid non-sticky actions inside the sheet.
+   */
+  .workspace:has(.sheet.confirm-open) {
+    overflow: hidden;
+  }
+  .workspace:has(.sheet.confirm-open) .layout {
+    flex: 1 1 auto;
     min-height: 0;
-    max-height: 22vh;
+    overflow: hidden;
+  }
+  .workspace:has(.sheet.confirm-open) .page-footer {
+    display: none;
+  }
+  .layout:has(.sheet.confirm-open) .canvas-wrap {
+    flex: 0 0 0;
+    min-height: 0;
+    max-height: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
   }
   .sheet.confirm-open {
     flex: 1 1 auto;
-    min-height: 52vh;
-    max-height: calc(100dvh - 120px);
+    min-height: 0;
+    max-height: none;
+    position: relative;
+    z-index: 1;
+    background: var(--panel);
+  }
+  /* Confirm carries its own title/identity; biography head stole the body viewport at 320. */
+  .sheet.confirm-open .sheet-head {
+    display: none;
   }
 }
 @media (max-width: 768px) {
@@ -412,8 +441,8 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
   .toolbar-actions { flex-wrap: wrap; }
   .sheet { padding: 16px; }
   .sheet.confirm-open {
-    min-height: 58vh;
-    max-height: calc(100dvh - 96px);
+    min-height: 0;
+    max-height: none;
   }
   .kin-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .form-pair { grid-template-columns: 1fr; }
