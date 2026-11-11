@@ -652,6 +652,7 @@ async function runAll() {
   const endHashes = {
     'frontend/js/app.js': fileSha('frontend/js/app.js'),
     'frontend/css/app.css': fileSha('frontend/css/app.css'),
+    'app/Http/Controllers/Api/V1/PersonController.php': fileSha('app/Http/Controllers/Api/V1/PersonController.php'),
   };
   const visMap = {
     note: 'Actual oracles exercised by this suite + sibling delete-correction suite on the same HEAD. Unsupported rows stay NOTRUN/UNVERIFIED — never padded as PASS.',
