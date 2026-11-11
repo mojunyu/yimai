@@ -713,18 +713,21 @@ async function testFocusAfterDeletedTrigger() {
     const a = document.activeElement;
     const live = a && document.body.contains(a) && (a.getClientRects?.().length || 0) > 0;
     const onBody = a === document.body || a === document.documentElement;
-    const onDeleted = a?.closest?.(`[data-id="${deletedId}"]`) || a?.id === 'btn-delete-person';
+    const onDeletedNode = a?.classList?.contains('node-card') && a.getAttribute('data-id') === String(deletedId);
     const onLiveNode = a?.classList?.contains('node-card') && a.getAttribute('data-id') !== String(deletedId);
     const onAdd = a?.id === 'btn-add';
+    // Singleton #btn-delete-person must not be the post-delete landing target.
+    const onDeleteSingleton = a?.id === 'btn-delete-person';
     return {
       live,
       onBody,
-      onDeleted: Boolean(onDeleted),
+      onDeletedNode: Boolean(onDeletedNode),
       onLiveNode: Boolean(onLiveNode),
       onAdd,
+      onDeleteSingleton,
       id: a?.id || null,
       dataId: a?.getAttribute?.('data-id') || null,
-      ok: live && !onBody && !onDeleted && (onLiveNode || onAdd),
+      ok: live && !onBody && !onDeletedNode && !onDeleteSingleton && (onLiveNode || onAdd),
     };
   }, auth.idT);
   await screenshot('vis-focus-after-delete.png');
@@ -932,12 +935,14 @@ async function testLoadingDisabledAndNarrowStates() {
   await openAuthed(alone, alone.idT);
   await selectById(alone.idN);
   await page.click('#btn-delete-person');
-  await clickConfirmPrimary();
-  await sleep(800);
-  await selectById(alone.idT);
-  await page.click('#btn-delete-person');
+  await page.waitForSelector('#sheet-confirm:not(.hidden)');
   await clickConfirmPrimary();
   await sleep(900);
+  await selectById(alone.idT);
+  await page.click('#btn-delete-person');
+  await page.waitForSelector('#sheet-confirm:not(.hidden)');
+  await clickConfirmPrimary();
+  await sleep(1000);
   const emptyUi = await page.evaluate(() => ({
     emptyHidden: document.getElementById('empty')?.classList.contains('hidden'),
     title: document.getElementById('sheet-title')?.textContent || '',

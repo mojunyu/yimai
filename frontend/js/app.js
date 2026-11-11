@@ -1165,7 +1165,7 @@ function isFocusableLiveTarget(node) {
   return rects.length > 0;
 }
 
-function focusAfterConfirmClose() {
+function focusAfterConfirmClose(options = {}) {
   const trigger = state.confirmTrigger;
   state.confirmTrigger = null;
   const tryFocus = (node) => {
@@ -1173,7 +1173,12 @@ function focusAfterConfirmClose() {
     node.focus?.();
     return document.activeElement === node;
   };
-  if (tryFocus(trigger)) return;
+  // #btn-delete-person is a singleton that survives person deletion — after a
+  // successful delete, prefer a live node / 添加 instead of returning to it.
+  const skipSingletonDeleteTrigger = Boolean(options.afterSuccessfulDelete)
+    && trigger
+    && trigger.id === 'btn-delete-person';
+  if (!skipSingletonDeleteTrigger && tryFocus(trigger)) return;
   const selected = findPerson(state.selectedId);
   if (selected) {
     const card = el.canvas?.querySelector(`.node-card[data-id="${selected.id}"]`);
@@ -1627,7 +1632,7 @@ async function afterSuccessfulDelete(op) {
   } catch (err) {
     if (!frozenAuthorityStillActive(op)) return;
     showError(el.sheetError, '删除已成功，但画面没有刷新成功。请点「重新载入」，不会再次删除。');
-    focusAfterConfirmClose();
+    focusAfterConfirmClose({ afterSuccessfulDelete: true });
     return;
   }
   if (!frozenAuthorityStillActive(op)) return;
@@ -1644,7 +1649,7 @@ async function afterSuccessfulDelete(op) {
     const keep = findPerson(state.selectedId);
     if (keep) openSheet(keep);
   }
-  focusAfterConfirmClose();
+  focusAfterConfirmClose({ afterSuccessfulDelete: true });
 }
 
 async function afterSuccessfulCorrection(op) {
