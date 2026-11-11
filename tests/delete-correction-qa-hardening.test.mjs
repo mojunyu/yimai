@@ -1374,12 +1374,29 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
     formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
   }));
   const emptyCollision = await measureAddNameFooterCollision();
+  // Sheet-open after last delete: empty chrome must not paint through (CSS hide).
+  const emptyLegendSheetOpen = await page.evaluate(() => {
+    const empty = document.getElementById('empty');
+    const emptyCs = empty ? getComputedStyle(empty) : null;
+    return {
+      emptyDisplay: emptyCs?.display || null,
+      ok: !empty || empty.classList.contains('hidden') || emptyCs?.display === 'none',
+    };
+  });
+  // Real empty visibility: sheet closed on short narrow (375×667 previously overlapped 世系一览/legend).
+  await page.evaluate(() => document.getElementById('btn-close-sheet')?.click());
+  await page.waitForFunction(() => document.getElementById('sheet')?.classList.contains('hidden'), { timeout: 5000 });
+  await page.setViewport({ width: 375, height: 667 });
+  await sleep(200);
   const emptyLegend = await page.evaluate(() => {
     const empty = document.getElementById('empty');
     const title = empty?.querySelector('.empty-title');
     const label = document.querySelector('.canvas-label');
     const legend = document.querySelector('.legend');
+    const foot = document.querySelector('.canvas-foot');
     const emptyCs = empty ? getComputedStyle(empty) : null;
+    const footCs = foot ? getComputedStyle(foot) : null;
+    const legendCs = legend ? getComputedStyle(legend) : null;
     const emptyHidden = !empty || empty.classList.contains('hidden') || emptyCs?.display === 'none';
     const overlap = (a, b) => {
       if (!a || !b) return false;
@@ -1388,15 +1405,31 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
     const tb = title?.getBoundingClientRect();
     const lb = label?.getBoundingClientRect();
     const gb = legend?.getBoundingClientRect();
-    const titleVisible = Boolean(title && !emptyHidden && (tb?.height || 0) > 0 && emptyCs?.display !== 'none');
+    const titleVisible = Boolean(
+      title && !emptyHidden && (tb?.height || 0) > 8 && emptyCs?.display !== 'none'
+      && (title.textContent || '').includes('把家人的名字'),
+    );
+    const labelVisible = Boolean(label && (lb?.height || 0) > 0 && (label.textContent || '').includes('世系一览'));
+    const legendVisible = Boolean(
+      legend && foot && footCs?.display !== 'none' && legendCs?.display !== 'none' && (gb?.height || 0) > 0,
+    );
+    const titleLegendOverlap = titleVisible && legendVisible && overlap(tb, gb);
+    const titleLabelOverlap = titleVisible && labelVisible && overlap(tb, lb);
     return {
       emptyHidden,
       titleVisible,
-      titleLegendOverlap: titleVisible && overlap(tb, gb),
-      titleLabelOverlap: titleVisible && overlap(tb, lb),
-      ok: emptyHidden || (!overlap(tb, gb) && !overlap(tb, lb)),
+      labelVisible,
+      legendVisible,
+      titleLegendOverlap,
+      titleLabelOverlap,
+      titleBox: tb ? { top: tb.top, bottom: tb.bottom, height: tb.height } : null,
+      labelBox: lb ? { top: lb.top, bottom: lb.bottom, height: lb.height } : null,
+      legendBox: gb ? { top: gb.top, bottom: gb.bottom, height: gb.height } : null,
+      // Both empty title and legend must be visible and non-overlapping (not merely CSS-hidden).
+      ok: titleVisible && labelVisible && legendVisible && !titleLegendOverlap && !titleLabelOverlap,
     };
   });
+  emptyLegend.sheetOpenHideOk = emptyLegendSheetOpen.ok;
   await screenshot('vis-empty-narrow-375.png');
 
   // Add-first flow without delete: empty tree → 添加 opens first-person form above footer.
@@ -1444,13 +1477,14 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
   await screenshot('vis-409-narrow-375.png');
   const order = await page.evaluate(() => Array.from(document.querySelectorAll('#sheet-confirm-actions button')).map((b) => b.textContent.trim()));
 
-  const payload = { busy, emptyUi, emptyCollision, emptyLegend, addFirstCollision, order };
+  const payload = { busy, emptyUi, emptyCollision, emptyLegend, emptyLegendSheetOpen, addFirstCollision, order };
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-loading-empty-409.json'), JSON.stringify(payload, null, 2));
   const ok = busy.ariaBusy === 'true'
     && busy.allDisabled
     && emptyUi.emptyHidden === false
     && emptyUi.placeholder.includes('张素芬')
     && emptyCollision.ok
+    && emptyLegendSheetOpen.ok
     && emptyLegend.ok
     && addFirstCollision.ok
     && order[0]?.includes('打开并更正');
@@ -1458,6 +1492,7 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
     busy,
     emptyUi,
     emptyOk: emptyCollision.ok,
+    emptyLegendSheetOpenOk: emptyLegendSheetOpen.ok,
     emptyLegendOk: emptyLegend.ok,
     addFirstOk: addFirstCollision.ok,
     order,
@@ -1858,6 +1893,9 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
     formVisible: !document.getElementById('form-add')?.classList.contains('hidden'),
   }));
   await screenshot('vis-contract-recovery.png');
+  // Archive pairing note: single recovery PNG is one frame (form+notice), not the full
+  // plant→survive-unrelated-delete→resume flow; JSON (recovery.raw) is the same-frame oracle.
+  recovery.archivePairingNote = 'vis-contract-recovery.png pairs with this JSON frame only; do not treat the PNG as the full recovery lifecycle.';
   await page.click('#btn-cancel-add');
   // Clear recovery so subsequent DEL before/after is not blocked by durable notice.
   await page.evaluate(() => localStorage.removeItem('yimai_add_recovery'));
@@ -1967,11 +2005,16 @@ async function testTrueBrowserZoomObstacle() {
     const b = fs.readFileSync(methodFile);
     framesDistinct = a.length !== b.length || !a.equals(b);
   }
+  const productBytes = fs.existsSync(productFile) ? fs.statSync(productFile).size : 0;
+  const addBytes = fs.existsSync(addFile) ? fs.statSync(addFile).size : 0;
   const productOk = playwrightProbe.status === 'PRODUCT_OK'
     && playwrightProbe.product?.ok === true
     && playwrightProbe.product?.operableConfirm === true
     && playwrightProbe.product?.confirmTitleInView === true
+    && playwrightProbe.product?.addReachable === true
     && framesDistinct
+    && productBytes > 12000
+    && addBytes > 12000
     && fs.existsSync(productFile)
     && fs.existsSync(addFile);
   const methodOnly = playwrightProbe.status === 'METHOD_OK' || (playwrightProbe.status === 'PRODUCT_OK' && !productOk);
@@ -2216,7 +2259,7 @@ async function runAll() {
   const vis14 = hardeningPassed['VIS-14 true browser 200% zoom product acceptance'] === true;
   const visKeyboard = hardeningPassed['VIS keyboard order: login/add/recovery reachable; trap+Esc only on confirm modal'];
   const visMap = {
-    note: 'Honest coverage on this HEAD. PASS only with full oracle. PARTIAL = some evidence, not whole matrix row. UNVERIFIED = missing/blocked. Never pad total PASS while required rows remain UNVERIFIED.',
+    note: 'Honest coverage on this HEAD. PASS only with full oracle. PARTIAL = some evidence, not whole matrix row. UNVERIFIED = missing/blocked. Never pad total PASS while required rows remain UNVERIFIED. Recovery: vis-contract-recovery.png is one-frame archive pair with JSON — not full recovery lifecycle.',
     head,
     scripts: {
       hardening: 'node tests/delete-correction-qa-hardening.test.mjs',
@@ -2231,7 +2274,7 @@ async function runAll() {
       { id: 'VIS-03', strength: vis03 && visKeyboard ? 'PASS' : 'FAIL', oracle: 'Tab cycle + Esc + desktop post-delete focus + narrow restore focus + login/add/recovery order' },
       { id: 'VIS-04', strength: vis04_16 ? 'PASS' : 'FAIL', oracle: 'state gallery: default/hover/focus/pressed/disabled/loading/error screenshots+style samples' },
       { id: 'VIS-05', strength: vis05 ? 'PASS' : 'FAIL', oracle: 'rendered getComputedStyle contrast sampling; disabled exempt' },
-      { id: 'VIS-06', strength: vis06_08 ? 'PASS' : 'FAIL', oracle: 'narrow empty + add-first 375: 例如：张素芬 vs page-footer non-collision geom+elementFromPoint' },
+      { id: 'VIS-06', strength: vis06_08 ? 'PASS' : 'FAIL', oracle: 'narrow empty 375×667 sheet-closed: 把家人的名字 vs 世系一览/legend both visible non-overlap + 例如/footer non-collision + add-first' },
       { id: 'VIS-07', strength: vis04_16 && vis06_08 ? 'PASS' : 'FAIL', oracle: 'loading busy + error-state gallery (sanitized unknown; no false success)' },
       { id: 'VIS-08', strength: vis06_08 && hardeningPassed['409 action hierarchy prefers open-child correction over retry delete'] ? 'PASS' : 'FAIL', oracle: 'desktop 409 hierarchy + narrow 375 409 screenshot' },
       { id: 'VIS-09', strength: vis09 ? 'PASS' : 'FAIL', oracle: 'focus-ring gallery screenshots + keyboard outline oracles on buttons/confirm/input' },

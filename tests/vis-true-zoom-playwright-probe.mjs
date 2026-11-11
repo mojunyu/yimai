@@ -265,28 +265,30 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
           document.getElementById('add-name')?.scrollIntoView({ block: 'center', inline: 'nearest' });
         });
         await page.waitForTimeout(150);
+        // Scroll add field into view; same-frame hit-test then viewport shot (clip/elementShot unreliable under page zoom).
+        await page.evaluate(() => {
+          document.getElementById('sheet')?.scrollIntoView({ block: 'start' });
+          document.getElementById('add-name')?.scrollIntoView({ block: 'center' });
+        });
+        await page.waitForTimeout(200);
         const addFrame = await page.evaluate(() => {
           const name = document.getElementById('add-name');
+          const form = document.getElementById('form-add');
           const box = name?.getBoundingClientRect();
+          const cx = box ? box.left + box.width / 2 : -1;
+          const cy = box ? box.top + box.height / 2 : -1;
+          const hit = document.elementFromPoint(cx, cy);
           const inView = Boolean(box && box.width > 0 && box.height > 0
-            && box.top >= 0 && box.bottom <= window.innerHeight + 1
-            && box.left >= 0 && box.right <= window.innerWidth + 1);
+            && box.top >= -1 && box.bottom <= window.innerHeight + 1);
           return {
-            ok: inView,
-            clip: box ? {
-              x: Math.max(0, Math.floor(box.left - 8)),
-              y: Math.max(0, Math.floor(box.top - 40)),
-              width: Math.min(window.innerWidth, Math.ceil(box.width + 16)),
-              height: Math.min(window.innerHeight, Math.ceil(box.height + 80)),
-            } : null,
+            ok: inView && !form?.classList.contains('hidden') && Boolean(hit?.closest?.('#form-add, #add-name, label')),
+            placeholder: name?.getAttribute('placeholder') || '',
+            hitId: hit?.id || null,
+            hitTag: hit?.tagName || null,
+            box: box ? { top: box.top, bottom: box.bottom, height: box.height } : null,
           };
         });
-        if (addFrame.clip && addFrame.clip.width > 0 && addFrame.clip.height > 0) {
-          await page.screenshot({
-            path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-add.png'),
-            clip: addFrame.clip,
-          });
-        }
+        await page.screenshot({ path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-add.png'), fullPage: false });
         await page.evaluate(() => document.getElementById('btn-cancel-add')?.click());
         await page.evaluate(() => {
           document.getElementById('delete-section')?.scrollIntoView({ block: 'nearest' });
@@ -294,11 +296,12 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
         });
         await page.waitForSelector('#sheet-confirm:not(.hidden)', { timeout: 8000 });
         await page.evaluate(() => {
-          document.getElementById('sheet-confirm')?.scrollIntoView({ block: 'center', inline: 'nearest' });
+          document.getElementById('sheet')?.scrollIntoView({ block: 'start' });
+          document.getElementById('sheet-confirm')?.scrollIntoView({ block: 'start' });
           document.querySelector('#sheet-confirm-actions button')?.scrollIntoView({ block: 'nearest' });
         });
-        await page.waitForTimeout(150);
-        // Same-frame oracle + clip: screenshot must show the controls just measured.
+        await page.waitForTimeout(200);
+        // Same-frame oracle (hit-test) then viewport screenshot while confirm remains open.
         product = await page.evaluate((ctx) => {
           const overflowX = document.documentElement.scrollWidth > window.innerWidth + 1;
           const title = document.getElementById('sheet-title')?.textContent || '';
@@ -307,60 +310,71 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
           const confirm = document.getElementById('sheet-confirm');
           const cancelBox = cancel?.getBoundingClientRect();
           const confirmBox = confirm?.getBoundingClientRect();
+          const titleBox = document.getElementById('sheet-confirm-title')?.getBoundingClientRect();
+          const tcx = titleBox ? titleBox.left + titleBox.width / 2 : -1;
+          const tcy = titleBox ? titleBox.top + titleBox.height / 2 : -1;
+          const titleHit = document.elementFromPoint(tcx, tcy);
+          const ccx = cancelBox ? cancelBox.left + cancelBox.width / 2 : -1;
+          const ccy = cancelBox ? cancelBox.top + cancelBox.height / 2 : -1;
+          const cancelHit = document.elementFromPoint(ccx, ccy);
           const operableConfirm = Boolean(
             cancelBox && cancelBox.width > 0 && cancelBox.height > 0
-            && cancelBox.top >= 0 && cancelBox.bottom <= window.innerHeight + 1,
+            && cancelBox.top >= -1 && cancelBox.bottom <= window.innerHeight + 1
+            && cancelHit?.closest?.('#sheet-confirm-actions, #sheet-confirm'),
           );
-          const confirmTitleInView = Boolean(confirmTitle && confirmBox
-            && confirmBox.top < window.innerHeight && confirmBox.bottom > 0);
+          const confirmTitleInView = Boolean(
+            confirmTitle
+            && titleBox
+            && titleBox.top >= -1
+            && titleBox.bottom <= window.innerHeight + 1
+            && titleHit?.closest?.('#sheet-confirm'),
+          );
           const at200 = ctx.iw <= 700 && (ctx.vvScale == null || Math.abs(ctx.vvScale - 1) < 0.15);
-          const clip = confirmBox ? {
-            x: Math.max(0, Math.floor(Math.min(confirmBox.left, cancelBox?.left || confirmBox.left))),
-            y: Math.max(0, Math.floor(confirmBox.top)),
-            width: Math.min(window.innerWidth, Math.ceil(Math.max(confirmBox.width, (cancelBox?.right || confirmBox.right) - confirmBox.left))),
-            height: Math.min(
-              window.innerHeight - Math.max(0, confirmBox.top),
-              Math.ceil((cancelBox?.bottom || confirmBox.bottom) - confirmBox.top + 8),
-            ),
-          } : null;
           return {
             overflowX,
             title,
             confirmTitle,
+            cancelLabel: (cancel?.textContent || '').trim(),
             operableConfirm,
             confirmTitleInView,
             addReachable: ctx.addOk,
-            clip,
+            addPlaceholder: ctx.addPlaceholder || '',
             iw: window.innerWidth,
+            ih: window.innerHeight,
             dpr: window.devicePixelRatio,
             vvScale: window.visualViewport?.scale ?? null,
             reZoomOk: ctx.ok,
-            readable: title.length > 0 && confirmTitle.length > 0 && confirmTitleInView,
+            confirmBox: confirmBox ? { top: confirmBox.top, bottom: confirmBox.bottom, height: confirmBox.height } : null,
+            readable: confirmTitle.length > 0 && confirmTitleInView,
             ok: ctx.ok && at200 && !overflowX && ctx.addOk && operableConfirm && confirmTitleInView
-              && title.length > 0 && confirmTitle.length > 0,
+              && confirmTitle.includes('删除'),
           };
         }, {
           ok: Boolean(reZoom?.ok && Math.abs(Number(reZoom.zoom) - 2) < 0.05),
           addOk: addFrame.ok,
+          addPlaceholder: addFrame.placeholder,
           ...zoomed,
         });
-        if (product?.clip && product.clip.width > 10 && product.clip.height > 10) {
-          await page.screenshot({
-            path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png'),
-            clip: product.clip,
-          });
-        } else {
-          await page.screenshot({
-            path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png'),
-            fullPage: false,
-          });
-        }
+        await page.screenshot({ path: path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png'), fullPage: false });
+        const methodBuf = fs.readFileSync(path.join(ARTIFACTS_DIR, 'vis-true-zoom-200.png'));
+        const productBuf = fs.readFileSync(path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-product.png'));
+        const addBuf = fs.readFileSync(path.join(ARTIFACTS_DIR, 'vis-true-zoom-200-add.png'));
+        const framesDistinct = productBuf.length !== methodBuf.length || !productBuf.equals(methodBuf);
+        const addDistinct = addBuf.length !== methodBuf.length || !addBuf.equals(methodBuf);
+        // Reject tiny/blank clips that previously matched oracles while showing only topbar.
+        const framesSubstantial = productBuf.length > 12000 && addBuf.length > 12000;
         product.screenshotFrame = {
           product: 'vis-true-zoom-200-product.png',
           add: 'vis-true-zoom-200-add.png',
           methodOnly: 'vis-true-zoom-200.png',
-          note: 'product/add clips are same-session frames as operableConfirm/addReachable; methodOnly ≠ product PASS',
+          capture: 'viewport screenshot after scrollIntoView + elementFromPoint same-frame oracles',
+          addFrame,
+          framesDistinct,
+          addDistinct,
+          bytes: { method: methodBuf.length, product: productBuf.length, add: addBuf.length },
+          note: 'methodOnly ≠ product PASS; product/add must show confirm/add controls via hit-test same frame',
         };
+        product.ok = Boolean(product.ok && framesDistinct && addDistinct && framesSubstantial);
         await page.keyboard.press('Escape');
       }
     }
