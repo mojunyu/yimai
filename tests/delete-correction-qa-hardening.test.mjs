@@ -154,6 +154,9 @@ async function installHooks() {
     window.__yimaiDeletePaths = [];
     window.__yimaiDeleteCommitted = [];
     window.__yimaiReconcileForceStatus = null;
+    window.__yimaiDelayNextPersonGetMs = 0;
+    window.__yimaiDelayNextPersonGetMode = null; // 'exists' | 'unknown' | 401 | 403
+    window.__yimaiPersonGetGate = null;
     window.fetch = async (input, init = {}) => {
       const url = String(input);
       const method = (init.method || 'GET').toUpperCase();
@@ -207,6 +210,33 @@ async function installHooks() {
           status,
           headers: { 'Content-Type': 'application/json' },
         });
+      }
+      // Delayed GET /persons/{id} for reconcile-in-flight → login B races.
+      if (
+        window.__yimaiDelayNextPersonGetMs > 0
+        && method === 'GET'
+        && /\/api\/v1\/persons\/\d+$/.test(url)
+      ) {
+        const ms = window.__yimaiDelayNextPersonGetMs;
+        const mode = window.__yimaiDelayNextPersonGetMode || 'exists';
+        window.__yimaiDelayNextPersonGetMs = 0;
+        window.__yimaiDelayNextPersonGetMode = null;
+        let release;
+        window.__yimaiPersonGetGate = new Promise((r) => { release = r; });
+        window.__yimaiReleaseDelayedPersonGet = release;
+        await window.__yimaiPersonGetGate;
+        await new Promise((r) => setTimeout(r, ms));
+        if (mode === 401 || mode === 403 || mode === '401' || mode === '403') {
+          return new Response(JSON.stringify({ message: 'forced delayed auth' }), {
+            status: Number(mode),
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (mode === 'unknown' || mode === 'network') {
+          throw new TypeError('Failed to fetch (simulated delayed reconcile network fail)');
+        }
+        // 'exists' — real GET under whatever token is current after release.
+        return window.__yimaiOrigFetch(input, init);
       }
       return window.__yimaiOrigFetch(input, init);
     };
@@ -773,12 +803,167 @@ async function testInFlightDelayedDeleteThenLoginB(mode) {
   // A person may or may not be gone depending on mode (ok vs network); either way B must be untouched.
   const aGone = !aAfter.data.some((p) => String(p.id) === String(a.idP));
   const modeOk = mode === 'ok' ? true : !aGone; // network fail must not delete
+  // Residual-2: B view must not keep A's detail/metadata/actions painted.
+  const bView = await page.evaluate((aId, aName) => {
+    const title = document.getElementById('sheet-title')?.textContent || '';
+    const puhao = document.getElementById('sheet-puhao')?.textContent || '';
+    const summary = document.getElementById('sheet-summary')?.textContent || '';
+    const setRoot = document.getElementById('btn-set-root')?.textContent || '';
+    const deleteLabel = document.getElementById('btn-delete-person')?.textContent || '';
+    const sheetHidden = document.getElementById('sheet')?.classList.contains('hidden');
+    const confirmHidden = document.getElementById('sheet-confirm')?.classList.contains('hidden');
+    const hasAName = title.includes(aName) || summary.includes(aName) || setRoot.includes(aName);
+    const hasAId = puhao.includes(String(aId)) || summary.includes(String(aId)) || setRoot.includes(String(aId));
+    return {
+      title, puhao, summary, setRoot, deleteLabel, sheetHidden, confirmHidden, hasAName, hasAId,
+      ok: !hasAName && !hasAId && confirmHidden,
+    };
+  }, a.idP, '甲树人');
   await screenshot(`del7-inflight-${mode}-after-login-b.png`);
   fs.writeFileSync(path.join(ARTIFACTS_DIR, `del7-inflight-${mode}.json`), JSON.stringify({
-    mode, midA, afterLogin, afterRelease, a: { idP: a.idP, persons: aAfter.data }, b: { before: bBefore.data, after: bAfter.data },
+    mode, midA, afterLogin, afterRelease, bView, a: { idP: a.idP, persons: aAfter.data }, b: { before: bBefore.data, after: bAfter.data },
     bStable, noAConfirm, noFalseSuccess, aGone, modeOk,
   }, null, 2));
-  log(`H-22 in-flight delayed ${mode}: login B then release — B unaffected, no A confirm reopen`, bStable && noAConfirm && noFalseSuccess && modeOk && afterLogin.userId === String(b.userId), `bStable=${bStable}, aGone=${aGone}, confirmHidden=${afterRelease.confirmHidden}`);
+  log(
+    `H-22 in-flight delayed ${mode}: login B then release — B unaffected, no A confirm/detail`,
+    bStable && noAConfirm && noFalseSuccess && modeOk && afterLogin.userId === String(b.userId) && bView.ok,
+    `bStable=${bStable}, aGone=${aGone}, confirmHidden=${afterRelease.confirmHidden}, bViewOk=${bView.ok}`,
+  );
+}
+
+async function measureBViewNoADetail(aPersonId, aName) {
+  return page.evaluate((aId, name) => {
+    const title = document.getElementById('sheet-title')?.textContent || '';
+    const puhao = document.getElementById('sheet-puhao')?.textContent || '';
+    const summary = document.getElementById('sheet-summary')?.textContent || '';
+    const setRoot = document.getElementById('btn-set-root')?.textContent || '';
+    const confirmBody = document.getElementById('sheet-confirm-body')?.textContent || '';
+    const confirmTitle = document.getElementById('sheet-confirm-title')?.textContent || '';
+    const sheetHidden = document.getElementById('sheet')?.classList.contains('hidden');
+    const confirmHidden = document.getElementById('sheet-confirm')?.classList.contains('hidden');
+    const textBlob = [title, puhao, summary, setRoot, confirmBody, confirmTitle].join('\n');
+    return {
+      title,
+      puhao,
+      sheetHidden,
+      confirmHidden,
+      textBlob,
+      hasAName: textBlob.includes(name),
+      hasAId: textBlob.includes(String(aId)) || puhao.includes(`谱号 ${aId}`),
+      ok: !textBlob.includes(name)
+        && !textBlob.includes(String(aId))
+        && confirmHidden,
+    };
+  }, aPersonId, aName);
+}
+
+async function testReconcileInFlightThenLoginB(mode) {
+  const { a, b } = seedForeign();
+  await openAuthed(a, a.idP);
+  await installHooks();
+  const bBefore = await personsApi(b.token);
+  await selectById(a.idP);
+  // Force unknown confirm first (network fail on DELETE), then delay the reconcile GET.
+  await page.evaluate(() => { window.__yimaiFailNextDeleteNetwork = true; });
+  await page.click('#btn-delete-person');
+  await clickConfirmPrimary();
+  await page.waitForFunction(() => (document.getElementById('sheet-confirm-title')?.textContent || '').includes('不确定'), { timeout: 8000 });
+  await page.evaluate((m) => {
+    window.__yimaiDelayNextPersonGetMs = 40;
+    window.__yimaiDelayNextPersonGetMode = m;
+  }, mode);
+  await page.evaluate(() => {
+    Array.from(document.querySelectorAll('#sheet-confirm-actions button')).find((btn) => btn.textContent.includes('核对'))?.click();
+  });
+  await page.waitForFunction(() => typeof window.__yimaiReleaseDelayedPersonGet === 'function', { timeout: 8000 });
+  await page.$eval('#email', (el, v) => { el.value = v; }, b.email);
+  await page.$eval('#password', (el) => { el.value = 'password'; });
+  await page.click('#btn-login');
+  await sleep(1000);
+  const afterLogin = await sheetText();
+  await page.evaluate(() => window.__yimaiReleaseDelayedPersonGet?.());
+  await sleep(900);
+  const afterRelease = await sheetText();
+  const bView = await measureBViewNoADetail(a.idP, '甲树人');
+  const bAfter = await personsApi(b.token);
+  const aAfter = await personsApi(a.token);
+  const bStable = JSON.stringify(bBefore.data.map((p) => p.id).sort()) === JSON.stringify(bAfter.data.map((p) => p.id).sort());
+  const noAConfirm = afterRelease.confirmHidden
+    && !(afterRelease.confirmBody || '').includes(String(a.idP))
+    && !(afterRelease.confirmTitle || '').includes('甲树人');
+  const aStillPresent = aAfter.data.some((p) => String(p.id) === String(a.idP));
+  await screenshot(`del7-reconcile-inflight-${mode}-after-login-b.png`);
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, `del7-reconcile-inflight-${mode}.json`), JSON.stringify({
+    mode, afterLogin, afterRelease, bView, bStable, noAConfirm, aStillPresent,
+    a: { idP: a.idP }, b: { before: bBefore.data, after: bAfter.data },
+  }, null, 2));
+  log(
+    `H-22 reconcile in-flight delayed ${mode}: login B — no A exists/unknown reopen, B view clean`,
+    bStable && noAConfirm && bView.ok && aStillPresent && afterLogin.userId === String(b.userId),
+    JSON.stringify({ bStable, noAConfirm, bViewOk: bView.ok, aStillPresent, confirmHidden: afterRelease.confirmHidden }),
+  );
+}
+
+async function testSameAccountReconcileDelayedExistsStillWorks() {
+  const auth = seedPerson('同账核对');
+  await openAuthed(auth, auth.idT);
+  await installHooks();
+  await selectById(auth.idT);
+  await page.evaluate(() => { window.__yimaiFailNextDeleteNetwork = true; });
+  await page.click('#btn-delete-person');
+  await clickConfirmPrimary();
+  await page.waitForFunction(() => (document.getElementById('sheet-confirm-title')?.textContent || '').includes('不确定'), { timeout: 8000 });
+  await page.evaluate(() => {
+    window.__yimaiDelayNextPersonGetMs = 40;
+    window.__yimaiDelayNextPersonGetMode = 'exists';
+  });
+  await page.evaluate(() => {
+    Array.from(document.querySelectorAll('#sheet-confirm-actions button')).find((btn) => btn.textContent.includes('核对'))?.click();
+  });
+  await page.waitForFunction(() => typeof window.__yimaiReleaseDelayedPersonGet === 'function', { timeout: 8000 });
+  await page.evaluate(() => window.__yimaiReleaseDelayedPersonGet?.());
+  await page.waitForFunction(() => (document.getElementById('sheet-confirm-body')?.textContent || '').includes('仍在家谱中'), { timeout: 8000 });
+  const ui = await sheetText();
+  const persons = await personsApi();
+  const ok = !ui.confirmHidden
+    && (ui.confirmBody || '').includes(String(auth.idT))
+    && persons.data.some((p) => String(p.id) === String(auth.idT));
+  await screenshot('del7-same-account-reconcile-delayed-exists.png');
+  log('Same-account delayed reconcile exists still reopens under A', ok, `title=${ui.confirmTitle}`);
+}
+
+async function testIdentityBoundaryTransitionTable() {
+  // Finite table of DEL/login awaits that may commit UI/state — oracle = frozenAuthorityStillActive / sheetOpStillCurrent.
+  const table = {
+    premiseRejected: 'Guarding only submitSheetOp aftermath does NOT make account-switch safe; reconcile post-await and identity-transition detail survive.',
+    reusableOracle: 'frozenAuthorityStillActive(frozen) = same opGen + authorityMatches; sheetOpStillCurrent adds live sheetOp ownership. Any post-await UI commit must pass before mutating confirm/detail.',
+    transitions: [
+      { id: 'T1', site: 'submitSheetOp after DELETE/PATCH await', commit: 'afterSuccessfulDelete/Correction', oracle: 'sheetOpStillCurrent' },
+      { id: 'T2', site: 'submitSheetOp catch', commit: 'showDeleteBlocked409 / showUnknownResult / reject error', oracle: 'sheetOpStillCurrent' },
+      { id: 'T3', site: 'submitSheetOp finally', commit: 'setConfirmBusy(false)', oracle: 'sheetOpStillCurrent' },
+      { id: 'T4', site: 'afterSuccessfulDelete after loadPersons/loadTree', commit: 'openSheet/closeSheet/showFirstPersonForm/errors', oracle: 'frozenAuthorityStillActive' },
+      { id: 'T5', site: 'afterSuccessfulCorrection after loadTree', commit: 'openSheet/errors', oracle: 'frozenAuthorityStillActive' },
+      { id: 'T6', site: 'reconcileAndContinue after reconcileRelationship', commit: 'exists reopen / showUnknownResult / afterSuccessful*', oracle: 'frozenAuthorityStillActive' },
+      { id: 'T7', site: 'reconcileAndContinue finally', commit: 'setConfirmBusy(false)', oracle: 'frozenAuthorityStillActive' },
+      { id: 'T8', site: 'showUnknownResult entry', commit: 'openConfirmLayer unknown', oracle: 'frozenAuthorityStillActive (else hide only)' },
+      { id: 'T9', site: 'login → invalidateSheetOpForAuthChange', commit: 'bump opGen + clearAccountScopedPresentation', oracle: 'generation bump fails T1–T8' },
+      { id: 'T10', site: 'login → loadTree', commit: 'must not repaint foreign detail (selectedId cleared; sheet closed)', oracle: 'B view negative: no A name/谱号/actions' },
+    ],
+  };
+  const source = fs.readFileSync(path.join(APP_ROOT, 'frontend/js/app.js'), 'utf8');
+  const checks = {
+    hasFrozenOracle: source.includes('function frozenAuthorityStillActive'),
+    hasSheetOpOracle: source.includes('function sheetOpStillCurrent'),
+    hasPresentationClear: source.includes('function clearAccountScopedPresentation'),
+    reconcileGuarded: /async function reconcileAndContinue[\s\S]*frozenAuthorityStillActive\(frozen\)/.test(source)
+      && /const result = await reconcileRelationship\(frozen\);[\s\S]*if \(!frozenAuthorityStillActive\(frozen\)\) return;/.test(source),
+    showUnknownGuarded: /function showUnknownResult[\s\S]*frozenAuthorityStillActive\(op\)/.test(source),
+    loginClearsPresentation: /invalidateSheetOpForAuthChange\('login'\)/.test(source)
+      && /clearAccountScopedPresentation\(/.test(source),
+  };
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del-identity-boundary-transition-table.json'), JSON.stringify({ table, checks }, null, 2));
+  const ok = Object.values(checks).every(Boolean) && table.transitions.length === 10;
+  log('Identity-boundary premise+transition table (10) + oracle wiring present', ok, JSON.stringify(checks));
 }
 
 async function testSameAccountDelayedDeleteStillWorks() {
@@ -1556,7 +1741,7 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
 }
 
 async function testTrueBrowserZoomObstacle() {
-  // Probe once; do not claim DPR2 or pageScaleFactor as browser chrome 200% zoom.
+  // Record puppeteer/CDP non-methods; Playwright extension probe writes separately if capable.
   const probe = await page.evaluate(() => ({
     iw: window.innerWidth,
     dpr: window.devicePixelRatio,
@@ -1575,7 +1760,6 @@ async function testTrueBrowserZoomObstacle() {
   } catch (err) {
     cdp = { error: String(err.message || err) };
   }
-  // Ctrl+= no-op check
   for (let i = 0; i < 3; i += 1) {
     await page.keyboard.down('Control');
     await page.keyboard.press('=');
@@ -1586,16 +1770,127 @@ async function testTrueBrowserZoomObstacle() {
     dpr: window.devicePixelRatio,
     vv: window.visualViewport ? { w: window.visualViewport.width, s: window.visualViewport.scale } : null,
   }));
+  const playwrightProbePath = path.join(ARTIFACTS_DIR, 'vis-true-zoom-playwright-probe.json');
+  const playwrightProbe = fs.existsSync(playwrightProbePath)
+    ? JSON.parse(fs.readFileSync(playwrightProbePath, 'utf8'))
+    : { status: 'PENDING_EXTERNAL_PROBE', note: 'Run tests/vis-true-zoom-playwright-probe.mjs before claiming VIS-14' };
+  const productOk = playwrightProbe.status === 'PRODUCT_OK' && playwrightProbe.product?.ok === true;
+  const methodOnly = playwrightProbe.status === 'METHOD_OK';
   const obstacle = {
-    status: 'UNVERIFIED',
-    reason: 'Headless Chromium in this cloud agent has no Browser/Page.setZoomLevel; Ctrl+= does not change CSS layout viewport; Emulation.setPageScaleFactor only changes visualViewport.scale (pinch-style) without reflowing CSS innerWidth — NOT browser-chrome 200% zoom. DPR2 likewise rejected.',
+    status: productOk ? 'PRODUCT_OK' : (methodOnly ? 'METHOD_OK_PENDING_PRODUCT' : 'UNVERIFIED'),
+    reason: productOk
+      ? 'Playwright chrome.tabs.setZoom(2) true page zoom + product readable/operable/no-x-overflow at 200%'
+      : (methodOnly
+        ? 'True page zoom method OK but product assertions incomplete — not VIS-14 PASS'
+        : (playwrightProbe.reason
+          || 'Puppeteer/CDP path cannot true-zoom; Playwright extension probe missing/failed')),
     probe,
     cdpPageScaleFactor: cdp,
     afterCtrlPlus: afterCtrl,
+    playwrightProbe,
   };
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-true-zoom-obstacle.json'), JSON.stringify(obstacle, null, 2));
-  // Environmental gap — not a product FAIL and never padded as PASS.
-  noteUnverified('VIS-14 true browser 200% zoom', obstacle.reason);
+  if (productOk) {
+    log('VIS-14 true browser 200% zoom product acceptance', true, 'PRODUCT_OK via chrome.tabs.setZoom + operable/no-x-overflow');
+  } else {
+    noteUnverified('VIS-14 true browser 200% zoom', obstacle.reason);
+  }
+}
+
+async function testKeyboardOrderLoginAddRecovery() {
+  // QA run3: login/add/recovery Tab order reachable; trap+Esc only for real modal (confirm), not inline forms.
+  await page.setViewport({ width: 1280, height: 800 });
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: 'networkidle0' });
+
+  await page.focus('#email');
+  const loginOrder = [];
+  for (let i = 0; i < 4; i += 1) {
+    loginOrder.push(await page.evaluate(() => {
+      const a = document.activeElement;
+      return a?.id || a?.tagName || null;
+    }));
+    await page.keyboard.press('Tab');
+  }
+  const loginOk = loginOrder.includes('email') && loginOrder.includes('password') && loginOrder.includes('btn-login');
+
+  const auth = seedPerson('键序T');
+  await openAuthed(auth, auth.idT);
+  await selectById(auth.idT);
+  await page.focus('#btn-add');
+  const addOrder = [];
+  for (let i = 0; i < 8; i += 1) {
+    addOrder.push(await page.evaluate(() => {
+      const a = document.activeElement;
+      return a?.id || a?.getAttribute?.('data-kin') || a?.tagName || null;
+    }));
+    await page.keyboard.press('Tab');
+  }
+  // Inline add form is NOT a modal — Esc must not invent a trap; confirm modal already covered by VIS-03.
+  await page.evaluate(() => document.querySelector('#kin-grid button[data-kin="son"]')?.click());
+  await page.waitForSelector('#form-add:not(.hidden)');
+  await page.focus('#add-name');
+  await page.keyboard.press('Escape');
+  const afterEscInline = await page.evaluate(() => ({
+    formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
+    confirmHidden: document.getElementById('sheet-confirm')?.classList.contains('hidden'),
+    activeId: document.activeElement?.id || null,
+  }));
+  const inlineNoTrap = afterEscInline.confirmHidden && afterEscInline.formHidden === false;
+
+  // Recovery notice keeps form keyboard-reachable (no new dialog).
+  await page.evaluate((payload) => {
+    localStorage.setItem('yimai_add_recovery', JSON.stringify({
+      userId: String(payload.userId),
+      treeId: String(payload.treeId),
+      pendingPersonId: payload.idN,
+      kin: 'son',
+      relation: 'child',
+      anchorId: Number(payload.idT),
+      parentRole: 'father',
+      name: '旁人N',
+      phase: 'bind_failed',
+      message: '人已记下，关系未保存：keyboard recovery probe',
+    }));
+  }, auth);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 10000 });
+  await selectById(auth.idT);
+  await page.evaluate(() => document.querySelector('#kin-grid button[data-kin="son"]')?.click());
+  await page.waitForSelector('#form-add:not(.hidden)');
+  await page.focus('#add-name');
+  const recoveryOrder = [];
+  for (let i = 0; i < 6; i += 1) {
+    recoveryOrder.push(await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || null));
+    await page.keyboard.press('Tab');
+  }
+  const recoveryReachable = recoveryOrder.includes('add-name')
+    || recoveryOrder.includes('btn-submit-add')
+    || recoveryOrder.includes('btn-cancel-add')
+    || recoveryOrder.includes('add-existing');
+
+  // Real modal: confirm still has forward trap (smoke — full cycle in VIS-03).
+  await page.click('#btn-delete-person');
+  await page.waitForSelector('#sheet-confirm:not(.hidden)');
+  const modalLabels = await page.evaluate(() => Array.from(document.querySelectorAll('#sheet-confirm-actions button')).map((b) => b.textContent.trim()));
+  await page.evaluate(() => document.querySelector('#sheet-confirm-actions button')?.focus());
+  for (let i = 0; i < modalLabels.length; i += 1) await page.keyboard.press('Tab');
+  const afterWrap = await page.evaluate(() => document.activeElement?.textContent?.trim() || null);
+  await page.keyboard.press('Escape');
+  await sleep(200);
+  const afterEscModal = await page.evaluate(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'));
+
+  const payload = {
+    loginOrder, loginOk, addOrder, afterEscInline, inlineNoTrap, recoveryOrder, recoveryReachable,
+    modalLabels, afterWrap, modalTrapOk: afterWrap === modalLabels[0], afterEscModal,
+  };
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'vis-keyboard-order-login-add-recovery.json'), JSON.stringify(payload, null, 2));
+  await screenshot('vis-keyboard-order-login-add-recovery.png');
+  const ok = loginOk && inlineNoTrap && recoveryReachable && payload.modalTrapOk && afterEscModal;
+  log('VIS keyboard order: login/add/recovery reachable; trap+Esc only on confirm modal', ok, JSON.stringify({
+    loginOk, inlineNoTrap, recoveryReachable, modalTrapOk: payload.modalTrapOk, afterEscModal,
+  }));
 }
 
 async function test409PrefersChildCorrection() {
@@ -1657,9 +1952,15 @@ async function runAll() {
     testDel7LostResponseTerminalAbsent,
     testDel7NetworkNoCommitSafeRetry,
     testAccountSwitchCannotConfirmDeletion,
+    testIdentityBoundaryTransitionTable,
     () => testInFlightDelayedDeleteThenLoginB('ok'),
     () => testInFlightDelayedDeleteThenLoginB('network'),
     testSameAccountDelayedDeleteStillWorks,
+    () => testReconcileInFlightThenLoginB('exists'),
+    () => testReconcileInFlightThenLoginB('unknown'),
+    () => testReconcileInFlightThenLoginB('401'),
+    () => testReconcileInFlightThenLoginB('403'),
+    testSameAccountReconcileDelayedExistsStillWorks,
     testReconcile401and403Unknown,
     testWriteSuccessRefreshFailNoRepeatMutation,
     testUnrelatedRecoveryPreserved,
@@ -1672,6 +1973,7 @@ async function runAll() {
     testStateGalleryAndFocusRings,
     testGlobalStructureContract,
     test409PrefersChildCorrection,
+    testKeyboardOrderLoginAddRecovery,
     testTrueBrowserZoomObstacle,
   ];
 
@@ -1703,19 +2005,22 @@ async function runAll() {
   const vis06_08 = hardeningPassed['VIS-04/06/07/08 loading busy + narrow empty/add-first footer + narrow 409'];
   const vis09 = hardeningPassed['VIS-09 focus-ring gallery + keyboard oracles'];
   const vis13 = hardeningPassed['VIS-13 global structure/content contract login/tree/detail/add/recovery + DEL before/after'];
+  const vis14 = hardeningPassed['VIS-14 true browser 200% zoom product acceptance'] === true;
+  const visKeyboard = hardeningPassed['VIS keyboard order: login/add/recovery reachable; trap+Esc only on confirm modal'];
   const visMap = {
-    note: 'Honest coverage on this HEAD. PASS only with full oracle. PARTIAL = some evidence, not whole matrix row. UNVERIFIED = missing/blocked. Never pad total PASS while required rows remain UNVERIFIED. VIS-14 remains environmental UNVERIFIED (true browser zoom).',
+    note: 'Honest coverage on this HEAD. PASS only with full oracle. PARTIAL = some evidence, not whole matrix row. UNVERIFIED = missing/blocked. Never pad total PASS while required rows remain UNVERIFIED.',
     head,
     scripts: {
       hardening: 'node tests/delete-correction-qa-hardening.test.mjs',
       delete: 'node tests/delete-correction.test.mjs',
       regression: 'node tests/frontend-regression.test.mjs',
       phpunit: 'php artisan test --compact',
+      trueZoomProbe: 'node tests/vis-true-zoom-playwright-probe.mjs',
     },
     rows: [
       { id: 'VIS-01', strength: 'PASS', oracle: 'desktop confirm structure (delete suite + hierarchy shot)' },
       { id: 'VIS-02', strength: vis02 ? 'PASS' : 'FAIL', oracle: '320/375/768 footer+actions non-occlusion + narrow cancel/success restore tree/footer/head' },
-      { id: 'VIS-03', strength: vis03 ? 'PASS' : 'FAIL', oracle: 'Tab cycle + Esc + desktop post-delete focus + narrow restore focus' },
+      { id: 'VIS-03', strength: vis03 && visKeyboard ? 'PASS' : 'FAIL', oracle: 'Tab cycle + Esc + desktop post-delete focus + narrow restore focus + login/add/recovery order' },
       { id: 'VIS-04', strength: vis04_16 ? 'PASS' : 'FAIL', oracle: 'state gallery: default/hover/focus/pressed/disabled/loading/error screenshots+style samples' },
       { id: 'VIS-05', strength: vis05 ? 'PASS' : 'FAIL', oracle: 'rendered getComputedStyle contrast sampling; disabled exempt' },
       { id: 'VIS-06', strength: vis06_08 ? 'PASS' : 'FAIL', oracle: 'narrow empty + add-first 375: 例如：张素芬 vs page-footer non-collision geom+elementFromPoint' },
@@ -1726,8 +2031,8 @@ async function runAll() {
       { id: 'VIS-11', strength: 'PASS', oracle: 'unknown never claims success' },
       { id: 'VIS-12', strength: 'PASS', oracle: 'root survivor perspective' },
       { id: 'VIS-13', strength: vis13 ? 'PASS' : 'FAIL', oracle: 'global contract pack: login/tree/detail/add/recovery + DEL before/after IDs/edges/root/stats' },
-      { id: 'VIS-14', strength: 'UNVERIFIED', oracle: 'true browser-chrome 200% zoom unavailable in headless cloud (see vis-true-zoom-obstacle.json); DPR2/pageScaleFactor/CSS zoom rejected; Master researching real Chromium page zoom method' },
-      { id: 'VIS-15', strength: vis03 ? 'PASS' : 'FAIL', oracle: 'paired with VIS-03 keyboard dialogs for delete confirm' },
+      { id: 'VIS-14', strength: vis14 ? 'PASS' : 'UNVERIFIED', oracle: 'Playwright chromium.tabs.setZoom(2) true page zoom + product readable/operable/no-x-overflow (see vis-true-zoom-*.json); DPR2/pageScaleFactor/CSS zoom rejected' },
+      { id: 'VIS-15', strength: vis03 && visKeyboard ? 'PASS' : 'FAIL', oracle: 'paired with VIS-03 keyboard dialogs; login/add/recovery order; trap only on confirm modal' },
       { id: 'VIS-16', strength: vis04_16 ? 'PASS' : 'FAIL', oracle: 'paired state gallery series (default/hover/focus/pressed/disabled/loading/error)' },
     ],
   };

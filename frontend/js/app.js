@@ -142,6 +142,12 @@ function authorityMatches(op) {
 /**
  * Generation+identity still active (works after hideConfirmLayer clears sheetOp).
  * Login/invalidate bumps sheetOpGen so in-flight awaits fail this check.
+ *
+ * Premise under test: guarding only submitSheetOp aftermath is NOT enough —
+ * reconcileAndContinue / showUnknownResult / identity-transition detail paint
+ * can still commit foreign UI. Every post-await UI commit in DEL confirm /
+ * reconcile / success / failure / finally AND login presentation must pass
+ * this (or sheetOpStillCurrent) before mutating the sheet.
  */
 function frozenAuthorityStillActive(frozen) {
   if (!frozen || frozen.opGen == null) return false;
@@ -171,16 +177,56 @@ function userFacingOpError(message) {
   return text;
 }
 
-function invalidateSheetOpForAuthChange(reason = 'identity_changed') {
-  // Bump generation first so any in-flight submitSheetOp await cannot pass sheetOpStillCurrent.
-  state.sheetOpGen = (state.sheetOpGen || 0) + 1;
-  if (!state.sheetOp) {
-    hideConfirmLayer();
-    return;
-  }
-  // Never continue writes or success reconciliation under a different account/tree.
-  state.sheetOp = { ...state.sheetOp, phase: 'unknown', invalidated: true, invalidateReason: reason };
+/**
+ * Clear account-scoped presentation on identity transition without touching other
+ * accounts' server data. Does not clear durable recovery here — login's
+ * loadScopedRecovery drops foreign recovery and keeps same-account pending.
+ */
+function clearAccountScopedPresentation() {
+  state.selectedId = null;
+  state.confirmTrigger = null;
+  state.rootId = '';
+  localStorage.removeItem(ROOT_KEY);
+  state.tree = { root_id: null, nodes: [], edges: [] };
+  state.persons = [];
+  state.mode = 'detail';
+  state.addIntent = emptyIntent({
+    pendingPersonId: state.recovery?.pendingPersonId ?? null,
+    parentRole: state.recovery?.parentRole || '',
+  });
   hideConfirmLayer();
+  el.formAdd?.classList.add('hidden');
+  setKinPressed('');
+  setFirstPersonChrome(false);
+  updateAnchorLabel(null);
+  setPuhao(null);
+  showError(el.addError, '');
+  showError(el.sheetError, '');
+  showError(el.sheetConfirmError, '');
+  if (el.sheetTitle) el.sheetTitle.textContent = '家人';
+  if (el.sheetSummary) el.sheetSummary.innerHTML = '';
+  if (el.correctList) el.correctList.innerHTML = '';
+  if (el.setRoot) {
+    el.setRoot.textContent = '从TA看这棵家谱';
+    delete el.setRoot.dataset.personId;
+  }
+  if (el.deleteSection) el.deleteSection.classList.add('hidden');
+  if (el.correctSection) el.correctSection.classList.add('hidden');
+  el.sheetDetail?.classList.remove('hidden');
+  el.sheet?.classList.add('hidden');
+  d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
+  updateStats();
+  render();
+}
+
+function invalidateSheetOpForAuthChange(reason = 'identity_changed') {
+  // Bump generation first so any in-flight submit/reconcile await cannot pass ownership checks.
+  state.sheetOpGen = (state.sheetOpGen || 0) + 1;
+  if (state.sheetOp) {
+    // Mark local copy invalidated before hide clears sheetOp reference.
+    state.sheetOp = { ...state.sheetOp, phase: 'unknown', invalidated: true, invalidateReason: reason };
+  }
+  clearAccountScopedPresentation();
   showError(el.sheetError, '登录身份已变更，刚才未完成的删除/纠错不能继续当作成功，也不会自动重试。');
 }
 
@@ -1531,6 +1577,15 @@ async function reconcileRelationship(op) {
 }
 
 function showUnknownResult(op, detailMessage) {
+  // Stale-context oracle: never reopen a foreign/invalidated confirm under a new identity.
+  if (!op || op.invalidated || !frozenAuthorityStillActive(op)) {
+    hideConfirmLayer();
+    showError(
+      el.sheetError,
+      userFacingOpError(detailMessage) || '登录身份已变更，刚才未完成的删除/纠错不能继续当作成功，也不会自动重试。',
+    );
+    return;
+  }
   state.sheetOp = { ...op, phase: 'unknown' };
   const safeDetail = userFacingOpError(detailMessage);
   openConfirmLayer({
@@ -1680,24 +1735,34 @@ async function afterSuccessfulCorrection(op) {
 
 async function reconcileAndContinue() {
   const op = state.sheetOp;
-  if (!op) return;
-  if (!authorityMatches(op)) {
-    showUnknownResult(op, '当前登录账户或家谱已变更，不能把这次结果当作已删除，也不会改打其他人。');
+  if (!op || op.invalidated) return;
+  // Ensure ownership generation is frozen for this reconcile await (submit already sets opGen).
+  if (op.opGen == null) {
+    state.sheetOpGen = (state.sheetOpGen || 0) + 1;
+    state.sheetOp = { ...op, opGen: state.sheetOpGen };
+  }
+  const frozen = { ...state.sheetOp };
+  if (!frozenAuthorityStillActive(frozen)) {
+    hideConfirmLayer();
+    showError(el.sheetError, '当前登录账户或家谱已变更，不能把这次结果当作已删除，也不会改打其他人。');
     return;
   }
   setConfirmBusy(true);
   try {
-    const result = await reconcileRelationship(op);
-    if (op.op === 'delete_person') {
+    const result = await reconcileRelationship(frozen);
+    // Post-await oracle: login B during GET must not reopen A exists/unknown layer.
+    if (!frozenAuthorityStillActive(frozen)) return;
+    if (frozen.op === 'delete_person') {
       if (result.status === 'absent_confirmed') {
-        await afterSuccessfulDelete(op);
+        await afterSuccessfulDelete(frozen);
         return;
       }
       if (result.status === 'exists') {
-        state.sheetOp = { ...op, phase: 'confirm' };
+        if (!frozenAuthorityStillActive(frozen)) return;
+        state.sheetOp = { ...frozen, phase: 'confirm' };
         openConfirmLayer({
           title: '结果还不确定',
-          bodyHtml: `<p>核对后，谱号 ${escapeHtml(String(op.personId))} 仍在家谱中。若要再次操作，仍针对这一谱号。</p>`,
+          bodyHtml: `<p>核对后，谱号 ${escapeHtml(String(frozen.personId))} 仍在家谱中。若要再次操作，仍针对这一谱号。</p>`,
           actions: [
             { label: '关闭', className: 'ghost', cancel: true, onClick: () => cancelConfirm() },
             {
@@ -1715,23 +1780,25 @@ async function reconcileAndContinue() {
         : result.reason === 'auth'
           ? '认证或权限失败，不能当作已删除。'
           : '认证失败、权限不足或单次含义不明的结果，不能当作已删除。';
-      showUnknownResult(op, reason);
+      if (!frozenAuthorityStillActive(frozen)) return;
+      showUnknownResult(frozen, reason);
       return;
     }
     if (result.status === 'applied') {
-      await afterSuccessfulCorrection(op);
+      await afterSuccessfulCorrection(frozen);
       return;
     }
     if (result.status === 'pending') {
+      if (!frozenAuthorityStillActive(frozen)) return;
       showError(el.sheetConfirmError, '核对后，原关系仍在。可对同一目标重试。');
-      setConfirmBusy(false);
       return;
     }
-    showUnknownResult(op, result.reason === 'identity_changed'
+    if (!frozenAuthorityStillActive(frozen)) return;
+    showUnknownResult(frozen, result.reason === 'identity_changed'
       ? '当前登录账户或家谱已变更，不能确认关系已更正。'
       : '还不能确认关系是否已更正。');
   } finally {
-    setConfirmBusy(false);
+    if (frozenAuthorityStillActive(frozen)) setConfirmBusy(false);
   }
 }
 
