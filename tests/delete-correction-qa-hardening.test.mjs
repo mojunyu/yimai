@@ -143,7 +143,15 @@ async function openAuthed(auth, rootId) {
 
 async function installHooks() {
   await page.evaluate(() => {
-    if (window.__yimaiOrigFetch) return;
+    if (window.__yimaiOrigFetch) {
+      // Keep existing interceptors; reset per-test scrubbed net log only.
+      window.__yimaiNetTrace = [];
+      window.__yimaiFailNextRelationBind = false;
+      window.__yimaiMarkNet = (label) => {
+        window.__yimaiNetTrace.push({ t: Date.now(), kind: 'marker', label: String(label || '') });
+      };
+      return;
+    }
     window.__yimaiOrigFetch = window.fetch.bind(window);
     window.__yimaiLoseNextDelete = false;
     window.__yimaiFailNextDeleteNetwork = false;
@@ -162,135 +170,223 @@ async function installHooks() {
     window.__yimaiDelayNextTreeGetMs = 0;
     window.__yimaiTreeGetGate = null;
     window.__yimaiFailNextRelationBind = false;
+    // Scrubbed same-window network trace: accountLabel only — never store raw tokens/Authorization.
+    window.__yimaiNetTrace = [];
+    window.__yimaiAccountLabelByToken = window.__yimaiAccountLabelByToken || Object.create(null);
+    window.__yimaiMarkNet = (label) => {
+      window.__yimaiNetTrace.push({
+        t: Date.now(),
+        kind: 'marker',
+        label: String(label || ''),
+      });
+    };
+    const tracePush = (entry) => {
+      window.__yimaiNetTrace.push({ t: Date.now(), ...entry });
+    };
+    const labelForAuth = (headers) => {
+      try {
+        let raw = '';
+        if (headers && typeof headers.get === 'function') {
+          raw = headers.get('Authorization') || headers.get('authorization') || '';
+        } else {
+          const h = headers || {};
+          raw = h.Authorization || h.authorization || '';
+        }
+        const token = String(raw).replace(/^Bearer\s+/i, '');
+        if (!token) return 'anon';
+        return window.__yimaiAccountLabelByToken[token] || 'unknown';
+      } catch (_) {
+        return 'unknown';
+      }
+    };
+    const pathOnly = (u) => {
+      try {
+        const x = new URL(u, location.origin);
+        return x.pathname + x.search;
+      } catch (_) {
+        return String(u).replace(/^https?:\/\/[^/]+/, '');
+      }
+    };
     window.fetch = async (input, init = {}) => {
       const url = String(input);
       const method = (init.method || 'GET').toUpperCase();
-      if (method === 'DELETE' && /\/api\/v1\/persons\/\d+/.test(url)) {
-        window.__yimaiDeletePaths.push(url);
-        if (window.__yimaiFailNextDeleteNetwork) {
-          window.__yimaiFailNextDeleteNetwork = false;
-          throw new TypeError('Failed to fetch (simulated delete network fail)');
-        }
-        if (window.__yimaiLoseNextDelete) {
-          window.__yimaiLoseNextDelete = false;
-          const res = await window.__yimaiOrigFetch(input, init);
-          window.__yimaiDeleteCommitted.push({ url, status: res.status });
-          throw new TypeError('Failed to fetch (simulated lost delete response)');
-        }
-        if (window.__yimaiDelayNextDeleteMs > 0) {
-          const ms = window.__yimaiDelayNextDeleteMs;
-          const mode = window.__yimaiDelayNextDeleteMode || 'ok';
-          window.__yimaiDelayNextDeleteMs = 0;
-          window.__yimaiDelayNextDeleteMode = null;
-          let release;
-          window.__yimaiDelayGate = new Promise((r) => { release = r; });
-          window.__yimaiReleaseDelayedDelete = release;
-          await window.__yimaiDelayGate;
-          await new Promise((r) => setTimeout(r, ms));
-          if (mode === 'network') {
-            throw new TypeError('Failed to fetch (simulated delayed delete network fail)');
+      const accountLabel = labelForAuth(init.headers || {});
+      const path = pathOnly(url);
+      const body = init.body ? String(init.body) : '';
+      const reqBodyPersonIds = Array.from(body.matchAll(/"(?:person_a_id|person_b_id|father_id|mother_id)"\s*:\s*(\d+)/g)).map((m) => m[1]);
+      const isWrite = ['POST', 'PATCH', 'PUT', 'DELETE'].includes(method);
+      const record = async (res) => {
+        let responsePersonId = null;
+        try {
+          if (res && method === 'POST' && /\/api\/v1\/persons\/?$/.test(path) && res.ok) {
+            const j = await res.clone().json();
+            responsePersonId = j?.id ?? j?.data?.id ?? null;
           }
-          const res = await window.__yimaiOrigFetch(input, init);
-          window.__yimaiDeleteCommitted.push({ url, status: res.status });
-          return res;
-        }
-      }
-      if (
-        window.__yimaiFailNextTreeGet
-        && method === 'GET'
-        && /\/api\/v1\/persons\/\d+\/tree/.test(url)
-      ) {
-        window.__yimaiFailNextTreeGet = false;
-        throw new TypeError('Failed to fetch (simulated tree refresh fail)');
-      }
-      // Independent reconcile negative oracles: force 401/403 on GET /persons/{id}
-      if (
-        window.__yimaiReconcileForceStatus
-        && method === 'GET'
-        && /\/api\/v1\/persons\/\d+$/.test(url)
-      ) {
-        const status = window.__yimaiReconcileForceStatus;
-        window.__yimaiReconcileForceStatus = null;
-        return new Response(JSON.stringify({ message: 'forced' }), {
-          status,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      // Delayed GET /persons/{id} for reconcile-in-flight → login B races.
-      if (
-        window.__yimaiDelayNextPersonGetMs > 0
-        && method === 'GET'
-        && /\/api\/v1\/persons\/\d+$/.test(url)
-      ) {
-        const ms = window.__yimaiDelayNextPersonGetMs;
-        const mode = window.__yimaiDelayNextPersonGetMode || 'exists';
-        window.__yimaiDelayNextPersonGetMs = 0;
-        window.__yimaiDelayNextPersonGetMode = null;
-        let release;
-        window.__yimaiPersonGetGate = new Promise((r) => { release = r; });
-        window.__yimaiReleaseDelayedPersonGet = release;
-        await window.__yimaiPersonGetGate;
-        await new Promise((r) => setTimeout(r, ms));
-        if (mode === 401 || mode === 403 || mode === '401' || mode === '403') {
-          return new Response(JSON.stringify({ message: 'forced delayed auth' }), {
-            status: Number(mode),
-            headers: { 'Content-Type': 'application/json' },
+        } catch (_) { /* ignore body parse */ }
+        if (/\/api\/v1\//.test(path)) {
+          tracePush({
+            kind: 'http',
+            accountLabel,
+            method,
+            path,
+            status: res?.status ?? 0,
+            write: isWrite,
+            responsePersonId: responsePersonId != null ? String(responsePersonId) : null,
+            reqBodyPersonIds: reqBodyPersonIds.length ? reqBodyPersonIds : undefined,
           });
         }
-        if (mode === 'unknown' || mode === 'network') {
-          throw new TypeError('Failed to fetch (simulated delayed reconcile network fail)');
+        return res;
+      };
+      try {
+        if (method === 'DELETE' && /\/api\/v1\/persons\/\d+/.test(url)) {
+          window.__yimaiDeletePaths.push(url);
+          if (window.__yimaiFailNextDeleteNetwork) {
+            window.__yimaiFailNextDeleteNetwork = false;
+            throw new TypeError('Failed to fetch (simulated delete network fail)');
+          }
+          if (window.__yimaiLoseNextDelete) {
+            window.__yimaiLoseNextDelete = false;
+            const res = await window.__yimaiOrigFetch(input, init);
+            window.__yimaiDeleteCommitted.push({ url, status: res.status });
+            throw new TypeError('Failed to fetch (simulated lost delete response)');
+          }
+          if (window.__yimaiDelayNextDeleteMs > 0) {
+            const ms = window.__yimaiDelayNextDeleteMs;
+            const mode = window.__yimaiDelayNextDeleteMode || 'ok';
+            window.__yimaiDelayNextDeleteMs = 0;
+            window.__yimaiDelayNextDeleteMode = null;
+            let release;
+            window.__yimaiDelayGate = new Promise((r) => { release = r; });
+            window.__yimaiReleaseDelayedDelete = release;
+            await window.__yimaiDelayGate;
+            await new Promise((r) => setTimeout(r, ms));
+            if (mode === 'network') {
+              throw new TypeError('Failed to fetch (simulated delayed delete network fail)');
+            }
+            const res = await window.__yimaiOrigFetch(input, init);
+            window.__yimaiDeleteCommitted.push({ url, status: res.status });
+            return record(res);
+          }
         }
-        // 'exists' — real GET under whatever token is current after release.
-        return window.__yimaiOrigFetch(input, init);
-      }
-      // Delayed GET /persons list — loadPersons sink race after login B.
-      if (
-        window.__yimaiDelayNextPersonsListMs > 0
-        && method === 'GET'
-        && /\/api\/v1\/persons\/?(\?|$)/.test(url)
-        && !/\/persons\/\d+/.test(url)
-      ) {
-        const ms = window.__yimaiDelayNextPersonsListMs;
-        window.__yimaiDelayNextPersonsListMs = 0;
-        let release;
-        window.__yimaiPersonsListGate = new Promise((r) => { release = r; });
-        window.__yimaiReleaseDelayedPersonsList = release;
-        await window.__yimaiPersonsListGate;
-        await new Promise((r) => setTimeout(r, ms));
-        return window.__yimaiOrigFetch(input, init);
-      }
-      // Delayed GET /persons/{id}/tree — loadTree sink race after login B.
-      if (
-        window.__yimaiDelayNextTreeGetMs > 0
-        && method === 'GET'
-        && /\/api\/v1\/persons\/\d+\/tree/.test(url)
-      ) {
-        const ms = window.__yimaiDelayNextTreeGetMs;
-        window.__yimaiDelayNextTreeGetMs = 0;
-        let release;
-        window.__yimaiTreeGetGate = new Promise((r) => { release = r; });
-        window.__yimaiReleaseDelayedTreeGet = release;
-        await window.__yimaiTreeGetGate;
-        await new Promise((r) => setTimeout(r, ms));
-        return window.__yimaiOrigFetch(input, init);
-      }
-      // Forced relation-bind failure after person create (add bind_failed path).
-      if (window.__yimaiFailNextRelationBind) {
-        const body = init.body ? String(init.body) : '';
-        const parentPatch = method === 'PATCH' && /\/api\/v1\/persons\/\d+$/.test(url)
-          && (body.includes('father_id') || body.includes('mother_id'));
-        const linkPost = method === 'POST' && /\/api\/v1\/(spouse-links|sibling-links)/.test(url);
-        if (parentPatch || linkPost) {
-          window.__yimaiFailNextRelationBind = false;
-          return new Response(JSON.stringify({ message: 'forced bind fail' }), {
-            status: 422,
+        if (
+          window.__yimaiFailNextTreeGet
+          && method === 'GET'
+          && /\/api\/v1\/persons\/\d+\/tree/.test(url)
+        ) {
+          window.__yimaiFailNextTreeGet = false;
+          throw new TypeError('Failed to fetch (simulated tree refresh fail)');
+        }
+        // Independent reconcile negative oracles: force 401/403 on GET /persons/{id}
+        if (
+          window.__yimaiReconcileForceStatus
+          && method === 'GET'
+          && /\/api\/v1\/persons\/\d+$/.test(url)
+        ) {
+          const status = window.__yimaiReconcileForceStatus;
+          window.__yimaiReconcileForceStatus = null;
+          return record(new Response(JSON.stringify({ message: 'forced' }), {
+            status,
             headers: { 'Content-Type': 'application/json' },
+          }));
+        }
+        // Delayed GET /persons/{id} for reconcile-in-flight → login B races.
+        if (
+          window.__yimaiDelayNextPersonGetMs > 0
+          && method === 'GET'
+          && /\/api\/v1\/persons\/\d+$/.test(url)
+        ) {
+          const ms = window.__yimaiDelayNextPersonGetMs;
+          const mode = window.__yimaiDelayNextPersonGetMode || 'exists';
+          window.__yimaiDelayNextPersonGetMs = 0;
+          window.__yimaiDelayNextPersonGetMode = null;
+          let release;
+          window.__yimaiPersonGetGate = new Promise((r) => { release = r; });
+          window.__yimaiReleaseDelayedPersonGet = release;
+          await window.__yimaiPersonGetGate;
+          await new Promise((r) => setTimeout(r, ms));
+          if (mode === 401 || mode === 403 || mode === '401' || mode === '403') {
+            return record(new Response(JSON.stringify({ message: 'forced delayed auth' }), {
+              status: Number(mode),
+              headers: { 'Content-Type': 'application/json' },
+            }));
+          }
+          if (mode === 'unknown' || mode === 'network') {
+            throw new TypeError('Failed to fetch (simulated delayed reconcile network fail)');
+          }
+          // 'exists' — real GET under whatever token is current after release.
+          return record(await window.__yimaiOrigFetch(input, init));
+        }
+        // Delayed GET /persons list — loadPersons sink race after login B.
+        if (
+          window.__yimaiDelayNextPersonsListMs > 0
+          && method === 'GET'
+          && /\/api\/v1\/persons\/?(\?|$)/.test(url)
+          && !/\/persons\/\d+/.test(url)
+        ) {
+          const ms = window.__yimaiDelayNextPersonsListMs;
+          window.__yimaiDelayNextPersonsListMs = 0;
+          let release;
+          window.__yimaiPersonsListGate = new Promise((r) => { release = r; });
+          window.__yimaiReleaseDelayedPersonsList = release;
+          await window.__yimaiPersonsListGate;
+          await new Promise((r) => setTimeout(r, ms));
+          return record(await window.__yimaiOrigFetch(input, init));
+        }
+        // Delayed GET /persons/{id}/tree — loadTree sink race after login B.
+        if (
+          window.__yimaiDelayNextTreeGetMs > 0
+          && method === 'GET'
+          && /\/api\/v1\/persons\/\d+\/tree/.test(url)
+        ) {
+          const ms = window.__yimaiDelayNextTreeGetMs;
+          window.__yimaiDelayNextTreeGetMs = 0;
+          let release;
+          window.__yimaiTreeGetGate = new Promise((r) => { release = r; });
+          window.__yimaiReleaseDelayedTreeGet = release;
+          await window.__yimaiTreeGetGate;
+          await new Promise((r) => setTimeout(r, ms));
+          return record(await window.__yimaiOrigFetch(input, init));
+        }
+        // Forced relation-bind failure after person create (add bind_failed path).
+        if (window.__yimaiFailNextRelationBind) {
+          const parentPatch = method === 'PATCH' && /\/api\/v1\/persons\/\d+$/.test(url)
+            && (body.includes('father_id') || body.includes('mother_id'));
+          const linkPost = method === 'POST' && /\/api\/v1\/(spouse-links|sibling-links)/.test(url);
+          if (parentPatch || linkPost) {
+            window.__yimaiFailNextRelationBind = false;
+            return record(new Response(JSON.stringify({ message: 'forced bind fail' }), {
+              status: 422,
+              headers: { 'Content-Type': 'application/json' },
+            }));
+          }
+        }
+        return record(await window.__yimaiOrigFetch(input, init));
+      } catch (err) {
+        if (/\/api\/v1\//.test(path)) {
+          tracePush({
+            kind: 'error',
+            accountLabel,
+            method,
+            path,
+            write: isWrite,
+            error: String(err?.message || err),
           });
         }
+        throw err;
       }
-      return window.__yimaiOrigFetch(input, init);
     };
   });
+}
+
+async function registerAccountNetLabel(auth, label) {
+  await page.evaluate((token, lbl) => {
+    window.__yimaiAccountLabelByToken = window.__yimaiAccountLabelByToken || Object.create(null);
+    window.__yimaiAccountLabelByToken[token] = lbl;
+  }, auth.token, label);
+}
+
+async function readScrubbedNetTrace() {
+  return page.evaluate(() => (window.__yimaiNetTrace || []).map((e) => ({ ...e })));
 }
 
 async function selectById(id) {
@@ -1169,16 +1265,36 @@ async function startAddSonBindFailWithDelayedTree(anchorId, childName) {
 
 async function testDelayedABindFailTreeAfterBLoaded() {
   // Negative: A create+bind_failed → delayed tree GET → B loaded → release must not paint A's tree/form on B.
+  // Same-window scrubbed net trace: after B login, no A-labeled writes; stale A tree GET may complete as read-only.
   const { a, b } = seedForeign();
   await openAuthed(a, a.idP);
   await installHooks();
+  await registerAccountNetLabel(a, 'A');
+  await registerAccountNetLabel(b, 'B');
+  await page.evaluate(() => window.__yimaiMarkNet?.('start_A_bindfail'));
   await startAddSonBindFailWithDelayedTree(a.idP, '甲儿');
   await page.waitForFunction(() => (document.getElementById('add-error')?.textContent || '').includes('人已记下'), { timeout: 8000 });
+  const aPendingBeforeB = await page.evaluate(() => {
+    try {
+      const rec = JSON.parse(localStorage.getItem('yimai_add_recovery') || 'null');
+      return rec?.pendingPersonId != null ? String(rec.pendingPersonId) : null;
+    } catch (_) {
+      return null;
+    }
+  });
+  await page.evaluate(() => window.__yimaiMarkNet?.('before_B_login'));
   await page.$eval('#email', (el, v) => { el.value = v; }, b.email);
   await page.$eval('#password', (el) => { el.value = 'password'; });
   await page.click('#btn-login');
   await page.waitForFunction((id) => localStorage.getItem('yimai_user_id') === String(id), { timeout: 15000 }, String(b.userId));
   await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 15000 });
+  // Form login mints a new token — label that session token as B (never archive the token itself).
+  await page.evaluate(() => {
+    const tok = localStorage.getItem('yimai_token');
+    window.__yimaiAccountLabelByToken = window.__yimaiAccountLabelByToken || Object.create(null);
+    if (tok) window.__yimaiAccountLabelByToken[tok] = 'B';
+  });
+  await page.evaluate(() => window.__yimaiMarkNet?.('B_loaded_before_release'));
   const beforeRelease = await snapshotBSurface();
   const beforeUi = await page.evaluate(() => ({
     formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
@@ -1186,6 +1302,7 @@ async function testDelayedABindFailTreeAfterBLoaded() {
     sheetError: document.getElementById('sheet-error')?.textContent || '',
   }));
   await page.evaluate(() => window.__yimaiReleaseDelayedTreeGet?.());
+  await page.evaluate(() => window.__yimaiMarkNet?.('after_release_A_tree'));
   await sleep(1000);
   const afterRelease = await snapshotBSurface();
   const afterUi = await page.evaluate(() => ({
@@ -1194,6 +1311,20 @@ async function testDelayedABindFailTreeAfterBLoaded() {
     sheetError: document.getElementById('sheet-error')?.textContent || '',
     stats: document.getElementById('stats')?.textContent?.replace(/\s+/g, ' ').trim() || '',
   }));
+  const netTrace = await readScrubbedNetTrace();
+  const afterBIdx = netTrace.findIndex((e) => e.kind === 'marker' && e.label === 'B_loaded_before_release');
+  const afterB = afterBIdx >= 0 ? netTrace.slice(afterBIdx + 1) : netTrace;
+  const aWritesAfterB = afterB.filter((e) => e.kind === 'http' && e.accountLabel === 'A' && e.write);
+  const aHttpAfterB = afterB.filter((e) => e.kind === 'http' && e.accountLabel === 'A');
+  const staleATreeReads = aHttpAfterB.filter((e) => e.method === 'GET' && /\/persons\/\d+\/tree/.test(e.path));
+  const aPersonIds = new Set([String(a.idP), ...(aPendingBeforeB ? [aPendingBeforeB] : [])]);
+  // No B-labeled write that targets A's root/pending person ids in path or body after B is loaded.
+  const bWritesTouchingAPersons = afterB.filter((e) => {
+    if (!(e.kind === 'http' && e.accountLabel === 'B' && e.write)) return false;
+    const pathIds = Array.from(String(e.path || '').matchAll(/\/persons\/(\d+)/g)).map((m) => m[1]);
+    const bodyIds = Array.isArray(e.reqBodyPersonIds) ? e.reqBodyPersonIds : [];
+    return [...pathIds, ...bodyIds].some((id) => aPersonIds.has(String(id)));
+  });
   const polluted = afterRelease.names.includes('甲树人')
     || afterRelease.names.includes('甲儿')
     || afterRelease.ids.includes(String(a.idP))
@@ -1206,6 +1337,7 @@ async function testDelayedABindFailTreeAfterBLoaded() {
     || (afterUi.addError || '').includes('人已记下')
     || (afterUi.sheetError || '').includes('人已记下')
     || (afterUi.stats || '').includes('2位亲人');
+  const netClean = aWritesAfterB.length === 0 && bWritesTouchingAPersons.length === 0;
   const bStable = beforeRelease.userId === String(b.userId)
     && afterRelease.userId === String(b.userId)
     && afterRelease.treeId === String(b.treeId)
@@ -1214,28 +1346,57 @@ async function testDelayedABindFailTreeAfterBLoaded() {
     && afterRelease.names.includes('乙树人')
     && afterRelease.names.length === 1
     && afterUi.formHidden === true
-    && !polluted;
+    && !polluted
+    && netClean;
   await screenshot('del7-delayed-a-bindfail-tree-after-b.png');
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del7-delayed-a-bindfail-tree-after-b.json'), JSON.stringify({
-    beforeRelease, beforeUi, afterRelease, afterUi, polluted, bStable,
-    a: { idP: a.idP, treeId: a.treeId, userId: a.userId },
-    b: { idP: b.idP, treeId: b.treeId, userId: b.userId },
-    note: 'Add bind_failed delayed tree/form commits must not pollute B; does not claim global isolation.',
+    beforeRelease, beforeUi, afterRelease, afterUi, polluted, bStable, netClean,
+    netTrace,
+    aWritesAfterB,
+    staleATreeReads,
+    bWritesTouchingAPersons,
+    aPendingBeforeB,
+    a: { label: 'A', idP: a.idP, treeId: a.treeId, userId: a.userId },
+    b: { label: 'B', idP: b.idP, treeId: b.treeId, userId: b.userId },
+    note: 'UI + scrubbed net: no A writes after B login; stale A tree GET read may finish; does not claim global isolation.',
   }, null, 2));
   log('Add-bind-fail delayed A tree after B loaded — B persons/tree/root/form/recovery clean', bStable, JSON.stringify({
-    polluted, names: afterRelease.names, formHidden: afterUi.formHidden, treeId: afterRelease.treeId,
+    polluted, netClean, aWritesAfterB: aWritesAfterB.length, aPendingBeforeB, names: afterRelease.names, formHidden: afterUi.formHidden,
   }));
 }
 
 async function testSameAccountBindFailDelayedTreeStillRecovers() {
-  // Positive: same A bind_failed + delayed tree still shows durable recovery and keeps A identity.
+  // Positive join: create POST id → bind_failed pendingId → release delayed tree → one user retry → relation OK, no duplicate POST.
   const auth = seedPerson('同账绑败');
   await openAuthed(auth, auth.idT);
   await installHooks();
+  await registerAccountNetLabel(auth, 'A');
+  await page.evaluate(() => window.__yimaiMarkNet?.('start_sameA_bindfail'));
   await startAddSonBindFailWithDelayedTree(auth.idT, '同账儿');
   await page.waitForFunction(() => (document.getElementById('add-error')?.textContent || '').includes('人已记下'), { timeout: 8000 });
+  const mid = await page.evaluate(() => {
+    let recovery = null;
+    try { recovery = JSON.parse(localStorage.getItem('yimai_add_recovery') || 'null'); } catch (_) { recovery = null; }
+    return {
+      recovery,
+      formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
+      addError: document.getElementById('add-error')?.textContent || '',
+    };
+  });
+  await page.evaluate(() => window.__yimaiMarkNet?.('release_delayed_tree'));
   await page.evaluate(() => window.__yimaiReleaseDelayedTreeGet?.());
   await sleep(800);
+  await page.evaluate(() => window.__yimaiMarkNet?.('before_user_retry'));
+  // One user-style recovery retry: clear forced bind fail, submit again with durable pendingId.
+  await page.evaluate(() => { window.__yimaiFailNextRelationBind = false; });
+  await page.click('#btn-submit-add');
+  await page.waitForFunction(() => {
+    const err = document.getElementById('add-error')?.textContent || '';
+    const formHidden = document.getElementById('form-add')?.classList.contains('hidden');
+    return formHidden || (!err.includes('人已记下') && !err.includes('forced bind fail'));
+  }, { timeout: 15000 });
+  await sleep(600);
+  await page.evaluate(() => window.__yimaiMarkNet?.('after_user_retry'));
   const snap = await page.evaluate(() => {
     let recovery = null;
     try { recovery = JSON.parse(localStorage.getItem('yimai_add_recovery') || 'null'); } catch (_) { recovery = null; }
@@ -1249,23 +1410,64 @@ async function testSameAccountBindFailDelayedTreeStillRecovers() {
       names: Array.from(document.querySelectorAll('g.node-card .person-name')).map((n) => n.textContent.trim()),
     };
   });
+  const persons = await personsApi();
+  const child = (persons.data || []).find((p) => p.name === '同账儿');
+  const netTrace = await readScrubbedNetTrace();
+  const createPosts = netTrace.filter((e) => e.kind === 'http' && e.method === 'POST' && /\/api\/v1\/persons\/?$/.test(e.path) && e.status >= 200 && e.status < 300);
+  const createId = createPosts[0]?.responsePersonId ? String(createPosts[0].responsePersonId) : null;
+  const pendingId = mid.recovery?.pendingPersonId != null ? String(mid.recovery.pendingPersonId) : null;
+  const bindPatches = netTrace.filter((e) => e.kind === 'http' && e.method === 'PATCH' && /\/api\/v1\/persons\/\d+$/.test(e.path));
+  const failedBind = bindPatches.find((e) => e.status === 422 && pendingId && e.path.endsWith(`/persons/${pendingId}`));
+  const okBind = bindPatches.find((e) => e.status >= 200 && e.status < 300
+    && pendingId && e.path.endsWith(`/persons/${pendingId}`)
+    && Array.isArray(e.reqBodyPersonIds) && e.reqBodyPersonIds.includes(String(auth.idT)));
+  const retryIdx = netTrace.findIndex((e) => e.kind === 'marker' && e.label === 'before_user_retry');
+  const afterRetry = retryIdx >= 0 ? netTrace.slice(retryIdx + 1) : [];
+  const postsAfterRetry = afterRetry.filter((e) => e.kind === 'http' && e.method === 'POST' && /\/api\/v1\/persons\/?$/.test(e.path));
+  const patchesAfterRetry = afterRetry.filter((e) => e.kind === 'http' && e.method === 'PATCH' && pendingId && e.path.endsWith(`/persons/${pendingId}`));
+  const relationOk = Boolean(child)
+    && String(child.father_id) === String(auth.idT)
+    && String(child.id) === String(pendingId)
+    && String(child.id) === String(createId);
   const ok = snap.userId === String(auth.userId)
     && snap.treeId === String(auth.treeId)
     && snap.rootId === String(auth.idT)
-    && snap.formHidden === false
-    && (snap.addError || '').includes('人已记下')
-    && snap.recovery
-    && String(snap.recovery.userId) === String(auth.userId)
-    && snap.recovery.phase === 'bind_failed'
-    && String(snap.recovery.pendingPersonId)
-    && snap.names.includes('同账绑败');
+    && mid.formHidden === false
+    && (mid.addError || '').includes('人已记下')
+    && mid.recovery
+    && mid.recovery.phase === 'bind_failed'
+    && pendingId
+    && createId
+    && pendingId === createId
+    && createPosts.length === 1
+    && postsAfterRetry.length === 0
+    && patchesAfterRetry.some((e) => e.status >= 200 && e.status < 300)
+    && Boolean(failedBind)
+    && Boolean(okBind)
+    && relationOk
+    && snap.names.includes('同账绑败')
+    && snap.names.includes('同账儿');
   await screenshot('del7-same-account-bindfail-delayed-tree.png');
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del7-same-account-bindfail-delayed-tree.json'), JSON.stringify({
-    snap, ok, auth: { userId: auth.userId, treeId: auth.treeId, idT: auth.idT },
-    note: 'Same-account bind_failed delayed tree must still commit recovery UI under A.',
+    mid, snap, ok,
+    join: {
+      createPostCount: createPosts.length,
+      createId,
+      pendingId,
+      failedBindStatus: failedBind?.status ?? null,
+      okBindStatus: okBind?.status ?? null,
+      postsAfterRetry: postsAfterRetry.length,
+      patchesAfterRetry: patchesAfterRetry.map((e) => ({ path: e.path, status: e.status, reqBodyPersonIds: e.reqBodyPersonIds })),
+      childId: child?.id ?? null,
+      childFatherId: child?.father_id ?? null,
+      relationOk,
+    },
+    netTrace,
+    auth: { label: 'A', userId: auth.userId, treeId: auth.treeId, idT: auth.idT },
+    note: 'Same-window scrubbed join: POST id == pendingId == retry bind target; no duplicate create POST.',
   }, null, 2));
   log('Same-account bind-fail delayed tree still recovers under A', ok, JSON.stringify({
-    phase: snap.recovery?.phase, formHidden: snap.formHidden, pending: snap.recovery?.pendingPersonId,
+    phase: mid.recovery?.phase, pendingId, createId, createPosts: createPosts.length, postsAfterRetry: postsAfterRetry.length, relationOk,
   }));
 }
 
