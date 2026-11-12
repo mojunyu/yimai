@@ -10,6 +10,7 @@ use App\Support\EnsuresCurrentTree;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
@@ -143,23 +144,32 @@ class PersonController extends Controller
     {
         $person = $this->findInCurrentTree($request, $id);
 
-        $hasChildren = Person::query()
-            ->where('tree_id', $person->tree_id)
-            ->where(function ($q) use ($person) {
-                $q->where('father_id', $person->id)
-                    ->orWhere('mother_id', $person->id);
-            })
-            ->exists();
+        // Application-level child guard (AC-5). Parent FKs use nullOnDelete, so the
+        // schema alone does not enforce 409 — re-check inside a transaction before delete.
+        return DB::transaction(function () use ($person) {
+            $children = Person::query()
+                ->where('tree_id', $person->tree_id)
+                ->where(function ($q) use ($person) {
+                    $q->where('father_id', $person->id)
+                        ->orWhere('mother_id', $person->id);
+                })
+                ->orderBy('id')
+                ->get(['id', 'name']);
 
-        if ($hasChildren) {
-            return response()->json([
-                'message' => 'Cannot delete person while children still reference them. Unbind children first.',
-            ], 409);
-        }
+            if ($children->isNotEmpty()) {
+                return response()->json([
+                    'message' => 'Cannot delete person while children still reference them. Unbind children first.',
+                    'children' => $children->map(fn (Person $child) => [
+                        'id' => $child->id,
+                        'name' => $child->name,
+                    ])->values()->all(),
+                ], 409);
+            }
 
-        $person->delete();
+            $person->delete();
 
-        return response()->json(null, 204);
+            return response()->json(null, 204);
+        });
     }
 
     public function tree(Request $request, string $id): JsonResponse

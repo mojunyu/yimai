@@ -5,21 +5,21 @@
   --ink: #302e29;
   --muted: #706a5e;
   --line: #d9d1c2;
-  --control-line: #a69c8a;
+  --control-line: #8a8070;
   --accent: #a13e32;
   --accent-hover: #873127;
   --accent-soft: #f4e8e0;
-  --parent: #8c897c;
+  --parent: #6a675c;
   --spouse: #a66552;
   --sibling: #5f7a6a;
-  --font: "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
-  --serif: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
+  --font: "PingFang SC", "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "Heiti SC", "Source Han Sans SC", sans-serif;
+  --serif: "Noto Serif SC", "Songti SC", "STSong", "SimSun", "Source Han Serif SC", "Noto Serif CJK SC", serif;
 }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
-  min-width: 760px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   color: var(--ink);
@@ -29,7 +29,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 button, input, select { font: inherit; }
-button, input, select, .node-card rect { transition: background-color 160ms ease, border-color 160ms ease, stroke 160ms ease, fill 160ms ease; }
+button, input, select, .node-card rect { transition: background-color 160ms ease, border-color 160ms ease, stroke 160ms ease, fill 160ms ease, opacity 160ms ease; }
 button {
   min-height: 40px;
   padding: 9px 17px;
@@ -44,11 +44,31 @@ button {
 }
 button:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
 button:active:not(:disabled) { box-shadow: inset 0 2px 4px #302e2926; }
-button:disabled { opacity: 0.45; cursor: not-allowed; }
-button.secondary { background: var(--ink); border-color: var(--ink); }
+button:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+  color: var(--muted);
+  background: var(--accent-soft);
+  border-color: var(--line);
+}
+button.secondary { background: var(--ink); border-color: var(--ink); color: var(--panel); }
 button.secondary:hover:not(:disabled) { background: #49453b; border-color: #49453b; }
+button.secondary:disabled { color: var(--muted); background: #efe8dc; border-color: var(--line); }
 button.ghost { color: var(--ink); background: transparent; border-color: var(--control-line); }
 button.ghost:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+button.ghost:disabled { color: var(--muted); background: #f7f1e8; border-color: var(--line); }
+button.is-busy > [aria-hidden="true"],
+button.is-busy::before {
+  display: inline-block;
+}
+button.is-busy > [aria-hidden="true"] {
+  animation: yimai-spin 0.8s linear infinite;
+}
+@keyframes yimai-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  button.is-busy > [aria-hidden="true"] { animation: none; }
+  button, input, select, .node-card rect { transition: none; }
+}
 :where(button, input, select, .node-card):focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 input, select {
   width: 100%;
@@ -98,7 +118,14 @@ input:focus, select:focus { border-color: var(--accent); }
 .auth #password { width: 125px; }
 .auth button { min-height: 34px; padding: 6px 19px; }
 
-.workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 32px; }
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 32px;
+  overflow: hidden; /* keep sheet/canvas above page-footer; sheet scrolls internally */
+}
 .workspace-head { min-height: 116px; display: flex; justify-content: space-between; align-items: center; gap: 24px; }
 .eyebrow { margin: 0 0 8px; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: 0.16em; }
 h1 { margin: 0; font-family: var(--serif); font-size: 29px; font-weight: 600; letter-spacing: 0.08em; line-height: 1.4; }
@@ -120,6 +147,8 @@ h1 { margin: 0; font-family: var(--serif); font-size: 29px; font-weight: 600; le
   flex: 1;
   min-height: 0;
   position: relative;
+  /* Clip absolute empty chrome so title cannot paint over 世系一览 / legend. */
+  overflow: hidden;
   /* A barely visible paper grain, drawn without image assets. */
   background-image: radial-gradient(#7f705014 0.5px, transparent 0.5px);
   background-size: 7px 7px;
@@ -134,7 +163,19 @@ h1 { margin: 0; font-family: var(--serif); font-size: 29px; font-weight: 600; le
 .legend-sibling { border-top: 1.5px dotted var(--sibling); }
 .legend i.legend-view { width: 7px; height: 7px; background: var(--accent); border-radius: 1px; }
 .canvas-footnote { font-family: var(--serif); font-size: 11px; color: var(--muted); letter-spacing: 0.12em; white-space: nowrap; }
-.page-footer { min-height: 38px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 10px; letter-spacing: 0.1em; }
+.page-footer {
+  flex: 0 0 auto;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  position: relative;
+  z-index: 1;
+  background: var(--bg);
+}
 
 .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 28px; text-align: center; pointer-events: none; }
 .empty-book { width: 90px; height: 72px; margin-bottom: 22px; stroke: var(--control-line); stroke-width: 1; }
@@ -143,16 +184,144 @@ h1 { margin: 0; font-family: var(--serif); font-size: 29px; font-weight: 600; le
 .empty .empty-title { font-family: var(--serif); font-size: 24px; color: var(--ink); letter-spacing: 0.08em; }
 .empty .hint { margin-top: 16px; font-size: 12px; }
 
-.sheet { flex: 0 0 388px; min-width: 0; border-left: 1px solid var(--line); background: var(--panel); padding: 28px; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.sheet {
+  flex: 0 0 388px;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  padding: 28px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.sheet.confirm-open {
+  overflow: hidden;
+}
+.sheet.confirm-open .sheet-head {
+  flex: 0 0 auto;
+}
+.child-correct-list {
+  margin: 12px 0 0;
+  padding-left: 1.2em;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.child-correct-list li { margin: 0 0 4px; }
 .sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 22px; border-bottom: 1px solid var(--line); margin-bottom: 22px; }
 .sheet-head .eyebrow { color: var(--accent); }
 .sheet-head h2 { margin: 0; font-family: var(--serif); font-size: 30px; font-weight: 600; line-height: 1.5; letter-spacing: 0.07em; overflow-wrap: anywhere; }
+.sheet-puhao { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--muted); letter-spacing: 0.04em; }
 .close-sheet { flex-shrink: 0; }
+.correct-list { display: flex; flex-direction: column; gap: 10px; }
+.correct-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.correct-row:last-child { border-bottom: 0; }
+.correct-meta { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; }
+.correct-meta .puhao { display: block; font-size: 11px; color: var(--muted); }
+.correct-note { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); }
+.correct-row button { flex: 0 0 auto; font-size: 12px; padding: 8px 12px; min-height: 36px; }
+.danger-zone { margin-top: 28px; }
+button.danger-ghost {
+  width: 100%;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+}
+button.danger-ghost:hover:not(:disabled) {
+  color: var(--accent-hover);
+  background: var(--accent-soft);
+  border-color: var(--accent-hover);
+}
+/* Confirm: body scrolls; actions are a non-overlapping flex sibling (not sticky-over-content). */
+.sheet-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  border-bottom: 0;
+}
+.sheet-confirm .confirm-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
+  flex: 0 0 auto;
+}
+.sheet-confirm .confirm-body {
+  font-size: 13px;
+  line-height: 1.9;
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
+}
+.sheet-confirm .confirm-identity { margin: 0 0 10px; font-family: var(--serif); }
+.sheet-confirm .confirm-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 0 0 auto;
+  position: static;
+  z-index: auto;
+  margin-top: 0;
+  padding: 12px 0 4px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.sheet-confirm .confirm-actions button { width: 100%; }
+.sheet-confirm .form-error { flex: 0 0 auto; }
+button.danger-solid {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--panel);
+}
+button.danger-solid:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+button.outline-action {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+}
+button.outline-action:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
 button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: var(--muted); min-height: 30px; font-size: 12px; }
 .close-sheet span { margin-left: 6px; font-size: 17px; }
 .sheet-summary { font-family: var(--serif); font-size: 14px; line-height: 2; overflow-wrap: anywhere; }
 .sheet-summary p { margin: 0 0 18px; }
 .sheet-summary .biography-kin { color: var(--muted); font-size: 13px; }
+.sheet-summary .inferred-sibling-note {
+  margin: -8px 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
 .biography-kin span { display: block; }
 .sheet-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .perspective-action button { width: 100%; overflow-wrap: anywhere; }
@@ -162,7 +331,12 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
 .section-hint { font-size: 11px; color: var(--muted); line-height: 1.8; margin: -5px 0 15px; }
 #add-anchor-label:not([hidden]) { color: var(--ink); font-weight: 500; margin: -8px 0 12px; }
 .add-name-emphasis { font-weight: 600; }
-.add-name-emphasis input { font-weight: 400; }
+.add-name-emphasis input {
+  font-family: var(--serif);
+  font-size: 16px;
+  font-weight: 500;
+  height: 46px;
+}
 .relation-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .relation-actions button { font-size: 12px; padding: 8px 5px; }
 
@@ -208,15 +382,18 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
 .node-card .node-paper { fill: var(--panel); stroke: #c2b8a5; stroke-width: 1; filter: drop-shadow(0 3px 3px #5448310a); }
 .node-card:hover .node-paper, .node-card:focus-visible .node-paper { fill: #fffaf0; stroke: var(--accent); }
 .node-card.root .node-paper { fill: #f8f0e4; stroke: var(--accent); }
-.node-card.selected .node-paper { stroke: var(--ink); stroke-width: 1.7; }
+.node-card.selected .node-paper { stroke: var(--ink); stroke-width: 2.2; }
 .node-card text { fill: var(--ink); pointer-events: none; }
 .node-card .person-name { font-family: var(--serif); font-weight: 600; letter-spacing: 0.04em; }
 .node-card .meta, .node-card .gender { font-family: var(--font); fill: var(--muted); font-size: 11px; }
-.node-card .view-label { font-family: var(--font); fill: var(--accent); font-size: 9px; letter-spacing: 0.08em; }
+.node-card .view-label { font-family: var(--font); fill: var(--accent); font-size: 11px; letter-spacing: 0.08em; }
 .node-card .view-mark { fill: var(--accent); }
-.edge-parent { stroke: var(--parent); stroke-width: 1.2; fill: none; }
+.edge-parent { stroke: var(--parent); stroke-width: 1.3; fill: none; }
 .edge-spouse { stroke: var(--spouse); stroke-width: 1.3; stroke-dasharray: 5 4; fill: none; }
 .edge-sibling { stroke: var(--sibling); stroke-width: 1.4; stroke-dasharray: 2 5; fill: none; }
+
+.toolbar-actions [aria-hidden="true"],
+.close-sheet span[aria-hidden="true"] { font-size: 16px; line-height: 1; }
 
 @media (max-width: 1200px) {
   .topbar { padding-inline: 26px; }
@@ -230,11 +407,131 @@ button.close-sheet { border-color: transparent; padding: 3px 0 3px 8px; color: v
   .canvas-footnote { display: none; }
 }
 @media (max-width: 1000px) {
-  .workspace-head { min-height: 120px; }
+  .workspace-head { min-height: 120px; flex: 0 0 auto; }
   .workspace-tools { flex-direction: column; align-items: flex-end; gap: 8px; }
-  .sheet { flex-basis: 330px; padding: 22px; }
+  /* min-height:0 (not 320px) so tall sheet/add-first cannot force layout under page-footer */
+  .layout { flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  .canvas-wrap { flex: 1 1 auto; min-height: 0; max-height: 42vh; }
+  .sheet { flex: 1 1 auto; flex-basis: auto; width: 100%; max-width: none; min-height: 0; border-left: 0; border-top: 1px solid var(--line); padding: 22px; }
   .canvas-heading > span:last-child { display: none; }
-  .legend { gap: 12px; }
+  .legend { gap: 12px; flex-wrap: wrap; }
+  /* Narrow empty: fit title inside stage so it cannot stack over 世系一览 / legend. */
+  .empty { padding: 10px 14px; }
+  .empty-book { width: 52px; height: 42px; margin-bottom: 8px; }
+  .empty .empty-title { font-size: 17px; letter-spacing: 0.04em; line-height: 1.4; }
+  .empty p { margin: 0 0 6px; font-size: 12px; line-height: 1.5; }
+  .empty .hint { margin-top: 6px; font-size: 11px; }
+  /* Sheet open (detail/add-first): keep canvas bounded so add form scrolls above footer */
+  .layout:has(.sheet:not(.hidden)):not(:has(.sheet.confirm-open)) .canvas-wrap {
+    flex: 0 1 28vh;
+    max-height: 32vh;
+  }
+  /*
+   * Empty + first-person sheet on narrow: the shrunk canvas used to stack
+   * empty-title「把家人的名字…」over 世系一览 / legend. Sheet owns the CTA;
+   * hide empty chrome + canvas-foot while sheet is open.
+   */
+  .layout:has(.sheet:not(.hidden)) .empty {
+    display: none !important;
+  }
+  .layout:has(.sheet:not(.hidden)) .canvas-foot {
+    display: none;
+  }
+  /*
+   * Confirm open: sheet owns the layout containing block.
+   * Root cause of VIS-02: page-footer + residual canvas competed with the sheet,
+   * so footer text painted through cancel/actions and body was starved.
+   * Hide page-footer and collapse canvas while confirm is open; body scrolls
+   * above solid non-sticky actions inside the sheet.
+   */
+  .workspace:has(.sheet.confirm-open) {
+    overflow: hidden;
+  }
+  .workspace:has(.sheet.confirm-open) .layout {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .workspace:has(.sheet.confirm-open) .page-footer {
+    display: none;
+  }
+  .layout:has(.sheet.confirm-open) .canvas-wrap {
+    flex: 0 0 0;
+    min-height: 0;
+    max-height: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .sheet.confirm-open {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    position: relative;
+    z-index: 1;
+    background: var(--panel);
+  }
+  /* Confirm carries its own title/identity; biography head stole the body viewport at 320. */
+  .sheet.confirm-open .sheet-head {
+    display: none;
+  }
+}
+/* Short CSS viewport (true page zoom / short phone): give sheet/empty room. */
+@media (max-width: 1000px) and (max-height: 700px) {
+  .workspace-head { min-height: 0; }
+  .canvas-wrap { max-height: none; }
+  .canvas-stage { min-height: 96px; }
+  .canvas-foot { min-height: 44px; }
+  .empty-book { display: none; }
+  .empty p:not(.empty-title):not(.hint) { display: none; }
+  .empty .empty-title { font-size: 16px; }
+  /*
+   * Only on short CSS heights (200% page zoom → ~400px, short phones).
+   * Do not collapse topbar on tall narrow (375×844) — restoring display/height
+   * after confirm was dumping focus onto <body> and failing VIS-02/03 restore.
+   * max-height collapse (not display:none) still frees space for confirm/add.
+   */
+  body:has(.sheet:not(.hidden)) .topbar,
+  body:has(.sheet.confirm-open) .topbar {
+    max-height: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+    border: 0;
+  }
+  .workspace:has(.sheet:not(.hidden)) .workspace-head,
+  .workspace:has(.sheet.confirm-open) .workspace-head {
+    max-height: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+@media (max-width: 768px) {
+  .topbar { flex-wrap: wrap; gap: 16px; padding: 12px 16px; min-height: 0; }
+  .auth { flex-wrap: wrap; width: 100%; justify-content: flex-start; }
+  .workspace { padding: 16px; gap: 16px; }
+  .workspace-head { flex-direction: column; align-items: stretch; gap: 12px; min-height: 0; }
+  .workspace-tools { align-items: stretch; width: 100%; }
+  .toolbar-actions { flex-wrap: wrap; }
+  .sheet { padding: 16px; }
+  .sheet.confirm-open {
+    min-height: 0;
+    max-height: none;
+  }
+  .kin-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .form-pair { grid-template-columns: 1fr; }
+}
+@media (max-width: 400px) {
+  .kin-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .auth-field { width: 100%; }
+  .auth input, .auth #password { width: 100%; }
 }
 @media (max-height: 720px) {
   .topbar { min-height: 76px; padding-block: 10px; }

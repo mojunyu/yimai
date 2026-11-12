@@ -5,7 +5,9 @@
     "scripts": {
         "build": "vite build",
         "dev": "vite",
-        "test:frontend": "node tests/frontend-regression.test.mjs"
+        "test:frontend": "node tests/frontend-regression.test.mjs",
+        "test:delete": "node tests/delete-correction.test.mjs",
+        "test:delete-hardening": "node tests/delete-correction-qa-hardening.test.mjs"
     },
     "devDependencies": {
         "@tailwindcss/vite": "^4.0.0",
