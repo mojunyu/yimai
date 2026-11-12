@@ -2443,14 +2443,13 @@ async function submitAdd(event) {
       else ensureRootForPerson(state.rootId);
       state.mode = 'add';
       state.addIntent.pendingPersonId = target.id;
+      // Bind-fail display refresh: commit only via guarded loadTree sinks, then
+      // re-check session before revealing the form (caller-side await alone is not enough).
+      const bindFailSnap = captureLoadSession();
       try {
-        await loadPersons();
-        syncRootWithPersons();
-        if (state.rootId) {
-          state.tree = await api(`/persons/${state.rootId}/tree`);
-          render();
-        }
-      } catch (_) { /* keep form + recovery */ }
+        await loadTree();
+      } catch (_) { /* keep form + recovery under the initiating session */ }
+      if (!loadSessionStillCurrent(bindFailSnap)) return;
       el.formAdd.classList.remove('hidden');
       return;
     }

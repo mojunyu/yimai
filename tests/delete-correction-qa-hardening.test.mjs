@@ -161,6 +161,7 @@ async function installHooks() {
     window.__yimaiPersonsListGate = null;
     window.__yimaiDelayNextTreeGetMs = 0;
     window.__yimaiTreeGetGate = null;
+    window.__yimaiFailNextRelationBind = false;
     window.fetch = async (input, init = {}) => {
       const url = String(input);
       const method = (init.method || 'GET').toUpperCase();
@@ -272,6 +273,20 @@ async function installHooks() {
         await window.__yimaiTreeGetGate;
         await new Promise((r) => setTimeout(r, ms));
         return window.__yimaiOrigFetch(input, init);
+      }
+      // Forced relation-bind failure after person create (add bind_failed path).
+      if (window.__yimaiFailNextRelationBind) {
+        const body = init.body ? String(init.body) : '';
+        const parentPatch = method === 'PATCH' && /\/api\/v1\/persons\/\d+$/.test(url)
+          && (body.includes('father_id') || body.includes('mother_id'));
+        const linkPost = method === 'POST' && /\/api\/v1\/(spouse-links|sibling-links)/.test(url);
+        if (parentPatch || linkPost) {
+          window.__yimaiFailNextRelationBind = false;
+          return new Response(JSON.stringify({ message: 'forced bind fail' }), {
+            status: 422,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
       }
       return window.__yimaiOrigFetch(input, init);
     };
@@ -994,8 +1009,9 @@ async function testIdentityBoundaryTransitionTable() {
       { id: 'T11', site: 'loadPersons after await api(/persons)', commit: 'state.persons + syncTreeIdFromPersons/TREE_KEY', oracle: 'loadSessionStillCurrent' },
       { id: 'T12', site: 'loadTree after await tree', commit: 'state.tree + rootId/ROOT_KEY + render + openSheet', oracle: 'loadSessionStillCurrent' },
       { id: 'T13', site: 'ensureCurrentTreeId after await /trees/current', commit: 'state.treeId + TREE_KEY', oracle: 'loadSessionStillCurrent' },
+      { id: 'T14', site: 'submitAdd bind_failed after await loadTree', commit: 'formAdd reveal (tree via guarded loadTree)', oracle: 'captureLoadSession + loadSessionStillCurrent' },
     ],
-    note: 'Source risk until delayed-A list/tree negative oracles pass. No claim that cross-account deletion of B was observed.',
+    note: 'Source risk until delayed-A list/tree/bind-fail negative oracles pass. No claim of global account isolation.',
   };
   const source = fs.readFileSync(path.join(APP_ROOT, 'frontend/js/app.js'), 'utf8');
   const checks = {
@@ -1010,10 +1026,11 @@ async function testIdentityBoundaryTransitionTable() {
       && /clearAccountScopedPresentation\(/.test(source),
     loadPersonsGuarded: /async function loadPersons[\s\S]*captureLoadSession\(\)[\s\S]*await api\('\/persons'\)[\s\S]*loadSessionStillCurrent\(snap\)/.test(source),
     loadTreeGuarded: /async function loadTree[\s\S]*captureLoadSession\(\)[\s\S]*loadSessionStillCurrent\(snap\)/.test(source),
+    bindFailRefreshGuarded: /phase: 'bind_failed'[\s\S]*captureLoadSession\(\)[\s\S]*await loadTree\(\)[\s\S]*loadSessionStillCurrent\(bindFailSnap\)/.test(source),
   };
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del-identity-boundary-transition-table.json'), JSON.stringify({ table, checks }, null, 2));
-  const ok = Object.values(checks).every(Boolean) && table.transitions.length === 13;
-  log('Identity-boundary premise+transition table (13 sinks) + oracle wiring present', ok, JSON.stringify(checks));
+  const ok = Object.values(checks).every(Boolean) && table.transitions.length === 14;
+  log('Identity-boundary premise+transition table (14 sinks) + oracle wiring present', ok, JSON.stringify(checks));
 }
 
 async function snapshotBSurface() {
@@ -1123,6 +1140,133 @@ async function testSameAccountReloadAfterDelayStillWorks() {
   const ok = snap.ids.includes(String(auth.idT)) && snap.userId === String(auth.userId);
   await screenshot('del7-same-account-delayed-persons-reload.png');
   log('Same-account delayed persons reload still commits under A', ok, JSON.stringify({ ids: snap.ids, userId: snap.userId }));
+}
+
+async function startAddSonBindFailWithDelayedTree(anchorId, childName) {
+  await selectById(anchorId);
+  await page.evaluate(() => {
+    window.__yimaiFailNextRelationBind = true;
+    window.__yimaiDelayNextTreeGetMs = 40;
+  });
+  await page.click('#btn-add');
+  await page.waitForSelector('#kin-grid', { timeout: 5000 });
+  await page.click('#kin-grid button[data-kin="son"]');
+  await page.waitForSelector('#form-add:not(.hidden)', { timeout: 5000 });
+  await page.evaluate((name) => {
+    const input = document.getElementById('add-name');
+    input.value = name;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const sel = document.getElementById('add-existing');
+    const wrap = document.getElementById('add-existing-wrap');
+    if (sel && wrap && !wrap.classList.contains('hidden')) {
+      sel.value = '__confirm_new__';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }, childName);
+  await page.click('#btn-submit-add');
+  await page.waitForFunction(() => typeof window.__yimaiReleaseDelayedTreeGet === 'function', { timeout: 15000 });
+}
+
+async function testDelayedABindFailTreeAfterBLoaded() {
+  // Negative: A create+bind_failed → delayed tree GET → B loaded → release must not paint A's tree/form on B.
+  const { a, b } = seedForeign();
+  await openAuthed(a, a.idP);
+  await installHooks();
+  await startAddSonBindFailWithDelayedTree(a.idP, '甲儿');
+  await page.waitForFunction(() => (document.getElementById('add-error')?.textContent || '').includes('人已记下'), { timeout: 8000 });
+  await page.$eval('#email', (el, v) => { el.value = v; }, b.email);
+  await page.$eval('#password', (el) => { el.value = 'password'; });
+  await page.click('#btn-login');
+  await page.waitForFunction((id) => localStorage.getItem('yimai_user_id') === String(id), { timeout: 15000 }, String(b.userId));
+  await page.waitForFunction(() => document.querySelectorAll('g.node-card').length >= 1, { timeout: 15000 });
+  const beforeRelease = await snapshotBSurface();
+  const beforeUi = await page.evaluate(() => ({
+    formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
+    addError: document.getElementById('add-error')?.textContent || '',
+    sheetError: document.getElementById('sheet-error')?.textContent || '',
+  }));
+  await page.evaluate(() => window.__yimaiReleaseDelayedTreeGet?.());
+  await sleep(1000);
+  const afterRelease = await snapshotBSurface();
+  const afterUi = await page.evaluate(() => ({
+    formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
+    addError: document.getElementById('add-error')?.textContent || '',
+    sheetError: document.getElementById('sheet-error')?.textContent || '',
+    stats: document.getElementById('stats')?.textContent?.replace(/\s+/g, ' ').trim() || '',
+  }));
+  const polluted = afterRelease.names.includes('甲树人')
+    || afterRelease.names.includes('甲儿')
+    || afterRelease.ids.includes(String(a.idP))
+    || afterRelease.title.includes('甲')
+    || afterRelease.puhao.includes(String(a.idP))
+    || afterRelease.rootId === String(a.idP)
+    || afterRelease.treeId === String(a.treeId)
+    || (afterRelease.recovery && String(afterRelease.recovery).includes(String(a.userId)))
+    || afterUi.formHidden === false
+    || (afterUi.addError || '').includes('人已记下')
+    || (afterUi.sheetError || '').includes('人已记下')
+    || (afterUi.stats || '').includes('2位亲人');
+  const bStable = beforeRelease.userId === String(b.userId)
+    && afterRelease.userId === String(b.userId)
+    && afterRelease.treeId === String(b.treeId)
+    && afterRelease.rootId === String(b.idP)
+    && afterRelease.ids.includes(String(b.idP))
+    && afterRelease.names.includes('乙树人')
+    && afterRelease.names.length === 1
+    && afterUi.formHidden === true
+    && !polluted;
+  await screenshot('del7-delayed-a-bindfail-tree-after-b.png');
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del7-delayed-a-bindfail-tree-after-b.json'), JSON.stringify({
+    beforeRelease, beforeUi, afterRelease, afterUi, polluted, bStable,
+    a: { idP: a.idP, treeId: a.treeId, userId: a.userId },
+    b: { idP: b.idP, treeId: b.treeId, userId: b.userId },
+    note: 'Add bind_failed delayed tree/form commits must not pollute B; does not claim global isolation.',
+  }, null, 2));
+  log('Add-bind-fail delayed A tree after B loaded — B persons/tree/root/form/recovery clean', bStable, JSON.stringify({
+    polluted, names: afterRelease.names, formHidden: afterUi.formHidden, treeId: afterRelease.treeId,
+  }));
+}
+
+async function testSameAccountBindFailDelayedTreeStillRecovers() {
+  // Positive: same A bind_failed + delayed tree still shows durable recovery and keeps A identity.
+  const auth = seedPerson('同账绑败');
+  await openAuthed(auth, auth.idT);
+  await installHooks();
+  await startAddSonBindFailWithDelayedTree(auth.idT, '同账儿');
+  await page.waitForFunction(() => (document.getElementById('add-error')?.textContent || '').includes('人已记下'), { timeout: 8000 });
+  await page.evaluate(() => window.__yimaiReleaseDelayedTreeGet?.());
+  await sleep(800);
+  const snap = await page.evaluate(() => {
+    let recovery = null;
+    try { recovery = JSON.parse(localStorage.getItem('yimai_add_recovery') || 'null'); } catch (_) { recovery = null; }
+    return {
+      userId: localStorage.getItem('yimai_user_id'),
+      treeId: localStorage.getItem('yimai_tree_id'),
+      rootId: localStorage.getItem('yimai_root_id'),
+      recovery,
+      formHidden: document.getElementById('form-add')?.classList.contains('hidden'),
+      addError: document.getElementById('add-error')?.textContent || '',
+      names: Array.from(document.querySelectorAll('g.node-card .person-name')).map((n) => n.textContent.trim()),
+    };
+  });
+  const ok = snap.userId === String(auth.userId)
+    && snap.treeId === String(auth.treeId)
+    && snap.rootId === String(auth.idT)
+    && snap.formHidden === false
+    && (snap.addError || '').includes('人已记下')
+    && snap.recovery
+    && String(snap.recovery.userId) === String(auth.userId)
+    && snap.recovery.phase === 'bind_failed'
+    && String(snap.recovery.pendingPersonId)
+    && snap.names.includes('同账绑败');
+  await screenshot('del7-same-account-bindfail-delayed-tree.png');
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'del7-same-account-bindfail-delayed-tree.json'), JSON.stringify({
+    snap, ok, auth: { userId: auth.userId, treeId: auth.treeId, idT: auth.idT },
+    note: 'Same-account bind_failed delayed tree must still commit recovery UI under A.',
+  }, null, 2));
+  log('Same-account bind-fail delayed tree still recovers under A', ok, JSON.stringify({
+    phase: snap.recovery?.phase, formHidden: snap.formHidden, pending: snap.recovery?.pendingPersonId,
+  }));
 }
 
 async function testSameAccountDelayedDeleteStillWorks() {
@@ -2211,6 +2355,8 @@ async function runAll() {
     testSameAccountReconcileDelayedExistsStillWorks,
     testDelayedAPersonsListAfterBLoaded,
     testDelayedATreeAfterBLoaded,
+    testDelayedABindFailTreeAfterBLoaded,
+    testSameAccountBindFailDelayedTreeStillRecovers,
     testSameAccountReloadAfterDelayStillWorks,
     testReconcile401and403Unknown,
     testWriteSuccessRefreshFailNoRepeatMutation,
