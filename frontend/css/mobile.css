@@ -86,10 +86,15 @@ body.is-preview #auth-topbar { display: none; }
   background: var(--m-bg);
   max-width: 430px;
   margin: 0 auto;
-  min-height: 40vh;
+  flex: 0 1 auto;
+  min-height: 0;
   padding-bottom: max(16px, env(safe-area-inset-bottom, 16px));
 }
 .mobile-shell[hidden] { display: none !important; }
+/* Confirm owns the narrow viewport (VIS-02/03); do not compete with sheet chrome. */
+body:has(.sheet.confirm-open) #mobile-shell {
+  display: none !important;
+}
 .m-view[hidden] { display: none !important; }
 
 .m-status-row,
@@ -349,10 +354,18 @@ body.is-preview #auth-topbar { display: none; }
 .m-overview-block { margin-bottom: 8px; }
 .m-overview-block .m-sec-label { margin-top: 12px; }
 
-/* Narrow: mobile shell first; desktop workspace remains reachable for tests/canvas. */
+/* Narrow: mobile shell first; desktop workspace keeps flex room for canvas/sheet. */
 @media (max-width: 899px) {
   body:not(.is-preview) .mobile-shell:not([hidden]) {
     border-bottom: 1px solid var(--m-line);
+    width: 100%;
+    max-width: none;
+    max-height: min(34vh, 300px);
+    overflow: auto;
+  }
+  body:not(.is-preview) #desktop-workspace {
+    flex: 1 1 auto;
+    min-height: 0;
   }
   body.is-preview #desktop-workspace {
     /* Keep in DOM for shared ids/hooks; visually secondary in preview. */
@@ -362,7 +375,10 @@ body.is-preview #auth-topbar { display: none; }
     pointer-events: none;
   }
   body.is-preview .mobile-shell:not([hidden]) {
+    max-width: 430px;
+    max-height: none;
     min-height: 100dvh;
+    overflow: visible;
   }
 }
 

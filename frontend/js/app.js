@@ -2657,7 +2657,9 @@ function showMobileView(view) {
 
 function updateMobileShellVisibility() {
   if (!mel.shell) return;
-  const show = Boolean(state.token) || state.previewMode;
+  // Non-preview empty trees keep the desktop empty/add-first chrome (VIS empty/footer).
+  // Preview always shows the mobile shell. Logged-in trees with people show list-first shell.
+  const show = state.previewMode || (Boolean(state.token) && state.persons.length > 0);
   mel.shell.hidden = !show;
   if (mel.previewBanner) mel.previewBanner.hidden = !state.previewMode;
   document.body.classList.toggle('is-preview', state.previewMode);
