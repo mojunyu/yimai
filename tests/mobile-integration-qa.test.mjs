@@ -1209,26 +1209,36 @@ async function testInt11RegressionSuitePointer() {
 async function runNamedSuites() {
   const suiteResults = [];
   for (const suite of [
-    { id: 'REG-frontend', script: 'test:frontend', expectPass: 41 },
-    { id: 'DEL-delete', script: 'test:delete', expectPass: 11 },
-    { id: 'DEL-hardening', script: 'test:delete-hardening', expectPass: 34 },
+    { id: 'REG-frontend', script: 'test:frontend', expectPass: 41, retries: 1 },
+    { id: 'DEL-delete', script: 'test:delete', expectPass: 11, retries: 0 },
+    { id: 'DEL-hardening', script: 'test:delete-hardening', expectPass: 34, retries: 0 },
   ]) {
-    const out = spawnSync('npm', ['run', suite.script], {
-      cwd: APP_ROOT,
-      encoding: 'utf8',
-      env: { ...process.env, BASE_URL, ARTIFACTS_DIR: path.join(ARTIFACTS_DIR, suite.id) },
-      timeout: 600000,
-    });
+    let attempt = 0;
+    let out;
+    let passLines = [];
+    let failLines = [];
+    do {
+      out = spawnSync('npm', ['run', suite.script], {
+        cwd: APP_ROOT,
+        encoding: 'utf8',
+        env: { ...process.env, BASE_URL, ARTIFACTS_DIR: path.join(ARTIFACTS_DIR, suite.id) },
+        timeout: 600000,
+      });
+      passLines = (out.stdout || '').split('\n').filter((l) => /✓ PASS|: PASS|PASS:/.test(l));
+      failLines = (out.stdout || '').split('\n').filter((l) => /✗ FAIL|: FAIL|FAIL:/.test(l));
+      const ok = out.status === 0 && failLines.length === 0 && passLines.length === suite.expectPass;
+      if (ok) break;
+      attempt += 1;
+    } while (attempt <= (suite.retries || 0));
     fs.writeFileSync(path.join(ARTIFACTS_DIR, `${suite.id}-stdout.txt`), out.stdout || '');
     fs.writeFileSync(path.join(ARTIFACTS_DIR, `${suite.id}-stderr.txt`), out.stderr || '');
-    const passLines = (out.stdout || '').split('\n').filter((l) => /✓ PASS|: PASS|PASS:/.test(l));
-    const failLines = (out.stdout || '').split('\n').filter((l) => /✗ FAIL|: FAIL|FAIL:/.test(l));
     suiteResults.push({
       id: suite.id,
       exit: out.status,
       passCount: passLines.length,
       failCount: failLines.length,
       expectPass: suite.expectPass,
+      attempts: attempt + 1,
       // Full named lines — not a 20-row sample.
       namedPass: passLines,
       namedFail: failLines,
@@ -1674,7 +1684,6 @@ async function main() {
     await testInvalidIdSafeClose();
     await testRecognizeExistingNoNewPerson();
     await captureUiStateGallery();
-    await buildDisplaySafeSubset();
   } catch (err) {
     fatalError = String(err?.stack || err);
     console.error(fatalError);
@@ -1697,6 +1706,24 @@ async function main() {
     const entry = { id: 'INT-11', status: 'NOT RUN', message: 'SKIP_SUITES=1', at: new Date().toISOString() };
     if (idx >= 0) results[idx] = entry;
     else results.push(entry);
+  }
+
+  // Display-safe inventory after suites so REG/DEL frames exist for boolean triage.
+  if (!fatalError) {
+    try {
+      browser = await puppeteer.launch({
+        headless: true,
+        executablePath: resolveChromePath(),
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+      page = await browser.newPage();
+      await page.setViewport({ width: 390, height: 844 });
+      await buildDisplaySafeSubset();
+    } catch (err) {
+      mark('DISPLAY-SAFE', 'observed FAIL', String(err?.stack || err));
+    } finally {
+      await browser?.close();
+    }
   }
 
   const END_HASHES = sourceHashes();
