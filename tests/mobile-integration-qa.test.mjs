@@ -886,6 +886,9 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
 
   await productLogin(a.account_email, a.password);
   await page.waitForFunction(() => (document.getElementById('m-list-rows')?.innerText || '').includes('林岚'), { timeout: 10000 });
+  // Live session token from product login() — not the seed token from php createToken.
+  const tokenALive = await page.evaluate(() => localStorage.getItem('yimai_token') || '');
+  if (!tokenALive) throw new Error('INT-09 missing live A token after product login');
 
   // Arm delay on product loadTree's tree GET for account A (Authorization match), then kick loadTree.
   await page.evaluate((tokenA) => {
@@ -896,10 +899,14 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
     window.__yimaiDelayedTreeHit = false;
     const originalFetch = window.fetch.bind(window);
     let armed = true;
+    const tokenNeedle = String(tokenA).slice(0, 16);
     window.fetch = async (url, opts = {}) => {
       const u = String(url);
-      const auth = opts.headers?.Authorization || opts.headers?.authorization || '';
-      if (armed && /\/persons\/\d+\/tree/.test(u) && String(auth).includes(tokenA.slice(0, 12))) {
+      const hdrs = opts.headers || {};
+      let auth = '';
+      if (typeof hdrs.get === 'function') auth = hdrs.get('Authorization') || hdrs.get('authorization') || '';
+      else auth = hdrs.Authorization || hdrs.authorization || '';
+      if (armed && /\/persons\/\d+\/tree/.test(u) && String(auth).includes(tokenNeedle)) {
         armed = false;
         window.__yimaiDelayedTreeHit = true;
         await gate;
@@ -907,7 +914,7 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
       }
       return originalFetch(url, opts);
     };
-  }, a.token);
+  }, tokenALive);
 
   // Kick product loadTree (in-flight A) without destroying the page.
   const loadPromiseHandle = page.evaluate(() => window.yimaiMobile.loadTree());
