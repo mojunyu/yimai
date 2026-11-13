@@ -589,18 +589,37 @@ async function testInt05CorrectionVsDelete() {
   await page.waitForSelector('#sheet-confirm:not(.hidden)');
   await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
   await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
+  // Wait for product afterSuccessfulCorrection loadTree to finish (mother row gone).
+  await page.waitForFunction(() => {
+    const kin = document.getElementById('m-detail-kin')?.innerText || '';
+    return !kin.includes('陈雨');
+  }, { timeout: 10000 });
   const afterMother = await apiJson(auth.token, 'GET', `/persons/${auth.idLan}`);
 
+  async function openMoreAction(label) {
+    await mobileOpenByName('林岚');
+    // mobileOpenPerson closes more; click once to open (avoid toggle-closed flake).
+    await page.evaluate(() => {
+      const panel = document.getElementById('m-more-panel');
+      if (panel && !panel.hidden) return;
+      document.getElementById('m-btn-more')?.click();
+    });
+    await page.waitForFunction(() => {
+      const panel = document.getElementById('m-more-panel');
+      return panel && !panel.hidden;
+    }, { timeout: 5000 });
+    await page.waitForFunction((lab) => Array.from(document.querySelectorAll('#m-more-rows .m-row'))
+      .some((b) => (b.textContent || '').includes(lab)), { timeout: 8000 }, label);
+    await page.evaluate((lab) => {
+      const row = Array.from(document.querySelectorAll('#m-more-rows .m-row'))
+        .find((b) => (b.textContent || '').includes(lab));
+      if (!row) throw new Error('missing ' + lab);
+      row.click();
+    }, label);
+    await page.waitForSelector('#sheet-confirm:not(.hidden)', { timeout: 8000 });
+  }
+
   // Spouse unlink via real DELETE /spouse-links/{id} product path — must not delete 周石.
-  await mobileOpenByName('林岚');
-  await page.evaluate(() => {
-    document.getElementById('m-btn-more')?.click();
-    const btn = Array.from(document.querySelectorAll('#m-more-rows .m-row'))
-      .find((b) => (b.textContent || '').includes('解除夫妻'));
-    if (!btn) throw new Error('missing 解除夫妻');
-    btn.click();
-  });
-  await page.waitForSelector('#sheet-confirm:not(.hidden)');
   const spouseNet = [];
   page.removeAllListeners('request');
   page.on('request', (req) => {
@@ -608,22 +627,19 @@ async function testInt05CorrectionVsDelete() {
       spouseNet.push(sanitizeNet({ method: req.method(), url: req.url(), headers: req.headers() }));
     }
   });
+  await openMoreAction('解除夫妻');
   await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
   await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
+  await page.waitForFunction(() => {
+    const kin = document.getElementById('m-detail-kin')?.innerText || '';
+    return !kin.includes('周石');
+  }, { timeout: 10000 });
   const shiStill = await apiJson(auth.token, 'GET', `/persons/${auth.idShi}`);
   const spouseList = await apiJson(auth.token, 'GET', '/spouse-links');
   const spouseGone = !(spouseList.json?.data || []).some((l) => Number(l.id) === Number(auth.spouseLinkId));
 
   // Explicit sibling unlink; inferred co-parent sibling prompt must remain.
-  await mobileOpenByName('林岚');
-  await page.evaluate(() => {
-    document.getElementById('m-btn-more')?.click();
-    const btn = Array.from(document.querySelectorAll('#m-more-rows .m-row'))
-      .find((b) => (b.textContent || '').includes('移除显式兄妹'));
-    if (!btn) throw new Error('missing 移除显式兄妹');
-    btn.click();
-  });
-  await page.waitForSelector('#sheet-confirm:not(.hidden)');
+  await openMoreAction('移除显式兄妹');
   await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
   await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
   await sleep(400);
