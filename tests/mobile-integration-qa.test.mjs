@@ -934,66 +934,66 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
 
   // Kick product loadTree (in-flight A) without destroying the page.
   const loadPromiseHandle = page.evaluate(() => window.yimaiMobile.loadTree());
-  await page.waitForFunction(() => window.__yimaiDelayedTreeHit === true, { timeout: 8000 });
+  try {
+    await page.waitForFunction(() => window.__yimaiDelayedTreeHit === true, { timeout: 8000 });
 
-  // Page-local switch to B via product login() — no reload, A request stays alive.
-  await page.evaluate(() => {
-    const pw = document.getElementById('password');
-    const em = document.getElementById('email');
-    if (pw) pw.value = '';
-    if (em) em.value = '';
-  });
-  await page.click('#email', { clickCount: 3 });
-  await page.type('#email', b.account_email);
-  await page.click('#password', { clickCount: 3 });
-  await page.type('#password', b.password);
-  await page.click('#btn-login');
-  await page.waitForFunction(() => (document.getElementById('m-list-rows')?.innerText || '').includes('乙独'), { timeout: 15000 });
-  await page.evaluate(() => {
-    const pw = document.getElementById('password');
-    if (pw) pw.value = '';
-  });
+    // Page-local switch to B via product login() — no reload, A request stays alive.
+    // Narrow mobile shell is position:fixed over #btn-login, so invoke product login()
+    // directly (same function as the button handler) after filling credentials.
+    await page.evaluate(async (email, password) => {
+      const em = document.getElementById('email');
+      const pw = document.getElementById('password');
+      if (em) em.value = email;
+      if (pw) pw.value = password;
+      await window.yimaiMobile.login();
+      if (pw) pw.value = '';
+    }, b.account_email, b.password);
+    await page.waitForFunction(() => (document.getElementById('m-list-rows')?.innerText || '').includes('乙独'), { timeout: 15000 });
 
-  const mid = await page.evaluate(() => window.yimaiMobile.stateSnap());
-  await screenshot('INT-09-gate-mid.png');
+    const mid = await page.evaluate(() => window.yimaiMobile.stateSnap());
+    await screenshot('INT-09-gate-mid.png');
 
-  // Release A's delayed tree response; product gate must drop it.
-  await page.evaluate(() => window.__yimaiReleaseDelayedTree?.());
-  await loadPromiseHandle.catch(() => {});
-  await sleep(600);
-  const after = await page.evaluate(() => ({
-    ...window.yimaiMobile.stateSnap(),
-    delayedReleased: window.__yimaiDelayedTreeReleased === true,
-    delayedHit: window.__yimaiDelayedTreeHit === true,
-  }));
-  await screenshot('INT-09-gate.png');
+    // Release A's delayed tree response; product gate must drop it.
+    await page.evaluate(() => window.__yimaiReleaseDelayedTree?.());
+    await loadPromiseHandle.catch(() => {});
+    await sleep(600);
+    const after = await page.evaluate(() => ({
+      ...window.yimaiMobile.stateSnap(),
+      delayedReleased: window.__yimaiDelayedTreeReleased === true,
+      delayedHit: window.__yimaiDelayedTreeHit === true,
+    }));
+    await screenshot('INT-09-gate.png');
 
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-09-api.json'), JSON.stringify({
-    mid,
-    after,
-    a: { userId: a.userId, treeId: a.treeId },
-    b: { userId: b.userId, treeId: b.treeId },
-  }, null, 2));
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-09-net.json'), JSON.stringify(netTrace, null, 2));
+    fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-09-api.json'), JSON.stringify({
+      mid,
+      after,
+      a: { userId: a.userId, treeId: a.treeId },
+      b: { userId: b.userId, treeId: b.treeId },
+    }, null, 2));
+    fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-09-net.json'), JSON.stringify(netTrace, null, 2));
 
-  const polluted = (after.personNames || []).includes('林岚')
-    || (after.listText || '').includes('林岚')
-    || (after.detailName || '').includes('林岚')
-    || String(after.userId) === String(a.userId)
-    || String(after.treeId) === String(a.treeId);
-  const ok = mid.personNames.includes('乙独')
-    && after.personNames.includes('乙独')
-    && after.personNames.length === 1
-    && String(after.userId) === String(b.userId)
-    && String(after.treeId) === String(b.treeId)
-    && after.delayedHit
-    && after.delayedReleased
-    && !polluted;
-  log('INT-09', ok, JSON.stringify({ mid, after, polluted }), {
-    account_id: b.userId,
-    tree_id: b.treeId,
-    note: 'product login + delayed product loadTree; no reload; A callback completed without polluting B',
-  });
+    const polluted = (after.personNames || []).includes('林岚')
+      || (after.listText || '').includes('林岚')
+      || (after.detailName || '').includes('林岚')
+      || String(after.userId) === String(a.userId)
+      || String(after.treeId) === String(a.treeId);
+    const ok = mid.personNames.includes('乙独')
+      && after.personNames.includes('乙独')
+      && after.personNames.length === 1
+      && String(after.userId) === String(b.userId)
+      && String(after.treeId) === String(b.treeId)
+      && after.delayedHit
+      && after.delayedReleased
+      && !polluted;
+    log('INT-09', ok, JSON.stringify({ mid, after, polluted }), {
+      account_id: b.userId,
+      tree_id: b.treeId,
+      note: 'product login + delayed product loadTree; no reload; A callback completed without polluting B',
+    });
+  } finally {
+    await page.evaluate(() => window.__yimaiReleaseDelayedTree?.()).catch(() => {});
+    await loadPromiseHandle.catch(() => {});
+  }
 }
 
 async function testInt10BindFailedZeroExtraPost() {

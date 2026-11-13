@@ -3305,6 +3305,8 @@ window.yimaiMobile = {
   persons: () => state.persons.map((p) => ({ id: p.id, name: p.name })),
   /** Product loadTree for identity-gate probes — same path as login/resume. */
   loadTree: () => loadTree(),
+  /** Product login() after filling #email/#password — same handler as #btn-login. */
+  login: () => login(),
   stateSnap: () => ({
     selectedId: state.selectedId,
     rootId: state.rootId,
