@@ -2,17 +2,27 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#f3efe6" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f2f2f7" />
   <title>一脉 · 把家人的故事记下来</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./css/app.css" />
+  <link rel="stylesheet" href="./css/mobile.css" />
   <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
 </head>
 <body>
-  <header class="topbar">
+  <div id="preview-banner" class="preview-banner" hidden>
+    <p>虚构预览·不保存，不连真实家谱</p>
+    <div class="preview-banner-actions">
+      <button type="button" id="btn-reduce-motion" aria-pressed="false">减少动态</button>
+      <button type="button" id="btn-preview-reset">重置样稿</button>
+      <a class="preview-exit" href="/app/">正式登录入口</a>
+    </div>
+  </div>
+
+  <header class="topbar" id="auth-topbar">
     <div class="brand-lockup">
       <span class="brand-seal" aria-hidden="true">家<br />谱</span>
       <div class="brand">一脉</div>
@@ -20,16 +30,126 @@
     </div>
     <div class="auth" aria-label="登录家谱">
       <label class="auth-field">账号
-        <input id="email" type="email" autocomplete="username" placeholder="请输入账号" value="demo@yimai.test" />
+        <input id="email" type="email" autocomplete="username" placeholder="请输入账号" />
       </label>
       <label class="auth-field">密码
-        <input id="password" type="password" autocomplete="current-password" placeholder="请输入密码" value="password" />
+        <input id="password" type="password" autocomplete="current-password" placeholder="请输入密码" />
       </label>
       <button type="button" id="btn-login" class="secondary">登录</button>
     </div>
   </header>
 
-  <main class="workspace">
+  <!-- Mobile-first A flow: 找家人 → 人物 → 添家人；与整谱共享同一 person id -->
+  <section id="mobile-shell" class="mobile-shell" aria-label="手机优先家人浏览" hidden>
+    <div id="m-view-list" class="m-view">
+      <div class="m-status-row">
+        <span id="m-list-status" class="m-muted"></span>
+        <button type="button" class="m-link" id="m-btn-overview">全谱</button>
+      </div>
+      <h1 class="m-large">家人</h1>
+      <div class="m-search">
+        <input id="m-search" type="search" placeholder="搜索姓名" enterkeyhint="search" autocomplete="off" autocorrect="off" spellcheck="false" />
+        <button type="button" class="m-clear" id="m-search-clear" hidden>清除</button>
+      </div>
+      <div class="m-group" id="m-list-rows"></div>
+      <p class="m-empty-hint" id="m-list-empty" hidden>没有叫这个名字的人</p>
+    </div>
+
+    <div id="m-view-detail" class="m-view" hidden>
+      <div class="m-nav">
+        <button type="button" class="m-back" id="m-btn-back-detail">家人</button>
+      </div>
+      <h1 class="m-large" id="m-detail-name"></h1>
+      <p class="m-puhao" id="m-detail-puhao" hidden></p>
+      <p class="m-feedback" id="m-detail-feedback" hidden tabindex="-1" role="status"></p>
+      <div id="m-detail-kin"></div>
+      <button type="button" class="m-cta" id="m-btn-add">给此人添家人</button>
+      <button type="button" class="m-ghost" id="m-btn-more" aria-expanded="false">更多</button>
+      <div id="m-more-panel" hidden>
+        <p class="m-sec-label">更多</p>
+        <div class="m-group" id="m-more-rows"></div>
+      </div>
+    </div>
+
+    <div id="m-view-overview" class="m-view" hidden>
+      <div class="m-nav">
+        <button type="button" class="m-back" id="m-btn-back-overview">家人</button>
+      </div>
+      <h1 class="m-large">全谱</h1>
+      <p class="m-muted m-pad">只读概览，点姓名打开人物；与列表同一批人与边。</p>
+      <div id="m-overview-body"></div>
+    </div>
+
+    <div id="m-view-empty" class="m-view" hidden>
+      <h1 class="m-large">家人</h1>
+      <p class="m-empty-hint">还没有记下家人</p>
+      <button type="button" class="m-cta" id="m-btn-first">写下第一位家人</button>
+    </div>
+  </section>
+
+  <dialog id="m-dlg-rel" class="m-dialog" aria-labelledby="m-rel-title">
+    <div class="m-dlg-head">
+      <button type="button" id="m-rel-cancel">取消</button>
+      <h2 id="m-rel-title">添家人</h2>
+      <span class="m-dlg-spacer"></span>
+    </div>
+    <div class="m-dlg-body">
+      <p class="m-form-error" id="m-rel-error" hidden></p>
+      <div id="m-rel-rows"></div>
+    </div>
+  </dialog>
+
+  <dialog id="m-dlg-name" class="m-dialog" aria-labelledby="m-name-title">
+    <form id="m-form-name">
+      <div class="m-dlg-head">
+        <button type="button" id="m-name-cancel">取消</button>
+        <h2 id="m-name-title">记下家人</h2>
+        <button type="submit" class="m-strong" id="m-name-done">记下</button>
+      </div>
+      <div class="m-dlg-body">
+        <p class="m-form-error" id="m-name-error" hidden></p>
+        <div id="m-name-new">
+          <div class="m-field">
+            <label for="m-name-input">姓名</label>
+            <input id="m-name-input" type="text" name="name" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done" maxlength="64" />
+          </div>
+        </div>
+        <div id="m-name-existing" hidden>
+          <p class="m-dlg-text" id="m-name-existing-label"></p>
+          <button type="button" class="m-ghost" id="m-name-clear-existing">改为写下新人</button>
+        </div>
+        <button type="button" class="m-ghost" id="m-name-toggle-years">填写生卒年（可选）</button>
+        <div class="m-years" id="m-name-years">
+          <div class="m-field">
+            <label for="m-name-birth">生年</label>
+            <input id="m-name-birth" type="text" inputmode="numeric" autocomplete="off" maxlength="4" />
+          </div>
+          <div class="m-field">
+            <label for="m-name-death">卒年</label>
+            <input id="m-name-death" type="text" inputmode="numeric" autocomplete="off" maxlength="4" />
+          </div>
+        </div>
+        <button type="button" class="m-ghost" id="m-name-pick">选择已有家人</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="m-dlg-pick" class="m-dialog" aria-labelledby="m-pick-title">
+    <div class="m-dlg-head">
+      <button type="button" id="m-pick-cancel">取消</button>
+      <h2 id="m-pick-title">选择已有家人</h2>
+      <span class="m-dlg-spacer"></span>
+    </div>
+    <div class="m-dlg-body">
+      <div class="m-search">
+        <input id="m-pick-search" type="search" placeholder="搜索姓名" enterkeyhint="search" autocomplete="off" autocorrect="off" spellcheck="false" />
+      </div>
+      <div class="m-group" id="m-pick-rows"></div>
+      <p class="m-empty-hint" id="m-pick-empty" hidden>没有可选择的人</p>
+    </div>
+  </dialog>
+
+  <main class="workspace" id="desktop-workspace">
     <div class="workspace-head">
       <div class="page-title">
         <p class="eyebrow">家 人 · 世 代 · 故 事</p>
@@ -59,7 +179,7 @@
             </svg>
             <p class="empty-title">把家人的名字，慢慢记下来</p>
             <p>一位亲人，一段故事，一代代相连。</p>
-            <p class="hint" id="empty-hint">用上方预填的演示账号登录，翻开这本家谱。</p>
+            <p class="hint" id="empty-hint">请在上方登录后，翻开这本家谱。预览免登录，正式记下需登录。</p>
           </div>
           <svg id="tree-canvas" aria-label="家族图谱"></svg>
         </div>
@@ -158,6 +278,10 @@
     </div>
     <footer class="page-footer"><span>一脉相承 · 家人常在</span><span>把名字记下，让故事有处安放。</span></footer>
   </main>
+
+  <p class="preview-entry-hint" id="preview-entry-hint">
+    <a href="/app/?preview=1">打开虚构预览（免登录·不保存）</a>
+  </p>
 
   <script type="module" src="./js/app.js"></script>
 </body>
