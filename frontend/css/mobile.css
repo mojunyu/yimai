@@ -34,6 +34,18 @@ html.reduce-motion *::after {
   font-family: var(--m-font);
 }
 .preview-banner[hidden] { display: none !important; }
+/* Fixed shell otherwise covers the banner — keep a short always-on preview mark. */
+body.is-preview #preview-banner:not([hidden]) {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  box-sizing: border-box;
+}
+body.is-preview {
+  --preview-banner-offset: 52px;
+}
 .preview-banner p {
   margin: 0;
   font-size: 13px;
@@ -446,14 +458,20 @@ body:has(.sheet.confirm-open) #mobile-shell {
   }
   body.is-preview #mobile-shell:not([hidden]) {
     position: fixed;
-    inset: 0;
+    top: var(--preview-banner-offset, 52px);
+    right: 0;
+    bottom: 0;
+    left: 0;
     z-index: 40;
     width: 100%;
     max-width: none;
     max-height: none;
-    min-height: 100dvh;
+    min-height: 0;
+    height: auto;
     margin: 0;
     overflow: auto;
+    padding-bottom: max(24px, env(safe-area-inset-bottom, 24px));
+    background: var(--m-bg);
   }
   body.is-preview #mobile-shell:not([hidden]) .m-view {
     max-width: 430px;
@@ -496,12 +514,16 @@ body:has(.sheet.confirm-open) #mobile-shell {
   }
   body.is-preview #mobile-shell:not([hidden]) {
     position: fixed;
-    inset: 0;
+    top: var(--preview-banner-offset, 52px);
+    right: 0;
+    bottom: 0;
+    left: 0;
     z-index: 40;
     max-width: none;
     width: 100%;
     margin: 0;
     overflow: auto;
+    background: var(--m-bg);
   }
   body.is-preview #mobile-shell .m-view {
     max-width: 430px;

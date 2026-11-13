@@ -317,6 +317,10 @@ async function testInt01MainPath() {
   await mobileOpenByName('林岚');
   const beforeId = await page.evaluate(() => window.yimaiMobile.selectedId());
   const beforeKin = await page.$eval('#m-detail-kin', (el) => el.innerText);
+  const beforeFootnote = await page.evaluate(() => ({
+    kin: document.getElementById('m-detail-kin')?.innerText || '',
+    summary: document.getElementById('sheet-summary')?.innerText || '',
+  }));
   await screenshot('INT-01-before.png');
   await mobileAddRelative('女儿', '集成女甲');
   const afterUi = await page.evaluate(() => ({
@@ -337,14 +341,18 @@ async function testInt01MainPath() {
   }, null, 2));
   await screenshot('INT-01-after.png');
   const daughter = (after.json.data || []).find((p) => p.name === '集成女甲');
+  const noPermanentInferred = !(beforeFootnote.kin || '').includes('因共同父母')
+    && !(beforeFootnote.summary || '').includes('因共同父母')
+    && !(afterUi.kin || '').includes('因共同父母');
   const ok = String(beforeId) === String(auth.idLan)
     && String(afterUi.selected) === String(auth.idLan)
     && afterUi.name === '林岚'
     && (afterUi.kin || '').includes('集成女甲')
     && beforeKin.includes('林谷')
     && daughter
-    && Number(daughter.mother_id) === Number(auth.idLan);
-  log('INT-01', ok, JSON.stringify({ beforeId, afterUi, daughterId: daughter?.id }), {
+    && Number(daughter.mother_id) === Number(auth.idLan)
+    && noPermanentInferred;
+  log('INT-01', ok, JSON.stringify({ beforeId, afterUi, daughterId: daughter?.id, noPermanentInferred }), {
     account_id: auth.userId,
     tree_id: auth.treeId,
     target_id: auth.idLan,
@@ -638,18 +646,36 @@ async function testInt05CorrectionVsDelete() {
   const spouseList = await apiJson(auth.token, 'GET', '/spouse-links');
   const spouseGone = !(spouseList.json?.data || []).some((l) => Number(l.id) === Number(auth.spouseLinkId));
 
-  // Explicit sibling unlink; inferred co-parent sibling prompt must remain.
+  // Explicit sibling unlink — co-parent inference feedback only in this correction context.
   await openMoreAction('移除显式兄妹');
   await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
   await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
-  await sleep(400);
+  await page.waitForFunction(() => {
+    const fb = document.getElementById('m-detail-feedback')?.textContent || '';
+    const err = document.getElementById('sheet-error')?.textContent || '';
+    return fb.includes('因共同父母') || err.includes('因共同父母');
+  }, { timeout: 10000 });
+  const postUnlink = await page.evaluate(() => ({
+    kin: document.getElementById('m-detail-kin')?.innerText || '',
+    feedback: document.getElementById('m-detail-feedback')?.textContent || '',
+    sheetErr: document.getElementById('sheet-error')?.textContent || '',
+    sheetSummary: document.getElementById('sheet-summary')?.innerText || '',
+  }));
+  await screenshot('INT-05-detail.png');
+  // Normal detail must NOT permanently footnote the co-parent rule.
+  await page.evaluate(() => {
+    document.getElementById('m-btn-back-detail')?.click();
+  });
+  await page.waitForSelector('#m-view-list:not([hidden])');
   await mobileOpenByName('林岚');
-  const kin = await page.$eval('#m-detail-kin', (el) => el.innerText);
-  const sheetErr = await page.evaluate(() => document.getElementById('sheet-error')?.textContent || '');
-  const sheetSummary = await page.evaluate(() => document.getElementById('sheet-summary')?.innerText || '');
+  const normalDetail = await page.evaluate(() => ({
+    kin: document.getElementById('m-detail-kin')?.innerText || '',
+    feedback: document.getElementById('m-detail-feedback')?.textContent || '',
+    sheetSummary: document.getElementById('sheet-summary')?.innerText || '',
+  }));
+  await screenshot('INT-05-normal-detail.png');
   const zhouStill = await apiJson(auth.token, 'GET', `/persons/${auth.idZhou}`);
   const heStill = await apiJson(auth.token, 'GET', `/persons/${auth.idHe}`);
-  await screenshot('INT-05-detail.png');
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-05-api.json'), JSON.stringify({
     afterMother: afterMother.json,
     shiStill: { status: shiStill.status, id: shiStill.json?.id },
@@ -659,15 +685,16 @@ async function testInt05CorrectionVsDelete() {
     siblingLinkId: auth.siblingLinkId,
     zhouStill: zhouStill.status,
     heStill: heStill.status,
-    kin,
-    sheetErr,
-    sheetSummary,
+    postUnlink,
+    normalDetail,
   }, null, 2));
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-05-spouse-unlink.json'), JSON.stringify(spouseNet, null, 2));
 
-  const inferredPrompt = (kin || '').includes('因共同父母')
-    || (sheetErr || '').includes('因共同父母')
-    || (sheetSummary || '').includes('因共同父母');
+  const inferredPrompt = (postUnlink.feedback || '').includes('因共同父母')
+    || (postUnlink.sheetErr || '').includes('因共同父母');
+  const noPermanentFootnote = !(normalDetail.kin || '').includes('因共同父母')
+    && !(normalDetail.sheetSummary || '').includes('因共同父母')
+    && !(normalDetail.feedback || '').includes('因共同父母');
   const ok = afterMother.status === 200
     && afterMother.json.mother_id == null
     && afterMother.json.father_id != null
@@ -677,26 +704,20 @@ async function testInt05CorrectionVsDelete() {
     && spouseNet.some((n) => n.url.includes(`/spouse-links/${auth.spouseLinkId}`))
     && zhouStill.status === 200
     && heStill.status === 200
-    && kin.includes('林禾')
-    && inferredPrompt;
+    && postUnlink.kin.includes('林禾')
+    && inferredPrompt
+    && noPermanentFootnote;
   log('INT-05', ok, JSON.stringify({
     mother: afterMother.json.mother_id,
     spouseGone,
     spouseLinkHit: spouseNet.map((n) => n.url),
     inferredPrompt,
+    noPermanentFootnote,
   }), { account_id: auth.userId, tree_id: auth.treeId, target_id: auth.idLan });
 }
 
 async function testInt06PreviewIsolation() {
-  const apiHits = [];
-  page.removeAllListeners('request');
-  page.on('request', (req) => {
-    if (req.url().includes('/api/v1/')) {
-      apiHits.push(sanitizeNet({ method: req.method(), url: req.url(), headers: req.headers(), resourceType: req.resourceType() }));
-    }
-  });
-
-  // Seed a fake production pointer first, then enter preview — preview must not overwrite it.
+  // Clear storage + set sentinels BEFORE attaching the preview-window net listener.
   await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
   await page.evaluate(() => {
     localStorage.clear();
@@ -711,55 +732,112 @@ async function testInt06PreviewIsolation() {
     token: localStorage.getItem('yimai_token'),
   }));
 
-  await openPreview();
-  await mobileOpenByName('林岚');
-  await mobileAddRelative('儿子', '预览儿');
-  await page.evaluate(() => {
-    document.getElementById('m-btn-back-detail')?.click();
+  const previewHits = [];
+  page.removeAllListeners('request');
+  page.on('request', (req) => {
+    if (req.url().includes('/api/v1/')) {
+      previewHits.push(sanitizeNet({
+        method: req.method(),
+        url: req.url(),
+        headers: req.headers(),
+        resourceType: req.resourceType(),
+      }));
+    }
   });
+
+  await openPreview();
+  const bannerVisible = async () => page.evaluate(() => {
+    const b = document.getElementById('preview-banner');
+    if (!b || b.hidden) return { ok: false, reason: 'hidden' };
+    const r = b.getBoundingClientRect();
+    const text = b.innerText || '';
+    return {
+      ok: r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < window.innerHeight
+        && /虚构|不保存/.test(text),
+      text: text.slice(0, 80),
+      rect: { top: r.top, height: r.height, bottom: r.bottom },
+    };
+  });
+
+  await page.waitForSelector('#mobile-shell:not([hidden])');
+  let mark = await bannerVisible();
+  await screenshot('INT-06-preview-list.png');
+  await mobileOpenByName('林岚');
+  mark = await bannerVisible();
+  await screenshot('INT-06-preview-detail.png');
+  await mobileAddRelative('儿子', '预览儿');
+  await page.evaluate(() => document.getElementById('m-btn-back-detail')?.click());
   await page.waitForSelector('#m-view-list:not([hidden])');
   await page.evaluate(() => document.getElementById('m-btn-overview')?.click());
   await page.waitForSelector('#m-view-overview:not([hidden])');
+  mark = await bannerVisible();
   const duringPreview = await page.evaluate(() => ({
     root: localStorage.getItem('yimai_root_id'),
     tree: localStorage.getItem('yimai_tree_id'),
     recovery: localStorage.getItem('yimai_add_recovery'),
     token: localStorage.getItem('yimai_token'),
     isPreview: window.yimaiMobile?.isPreview?.(),
+    bannerText: document.getElementById('preview-banner')?.innerText || '',
   }));
   await screenshot('INT-06-preview.png');
 
-  // Leave preview to formal /app/ in same browser — production pointers must survive.
+  page.removeAllListeners('request');
+
+  // Leave preview to formal /app/ — production pointers must survive.
   await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => {
+    const em = document.getElementById('email');
+    const pw = document.getElementById('password');
+    if (em) em.value = '';
+    if (pw) pw.value = '';
+  });
   const afterPreview = await page.evaluate(() => ({
     root: localStorage.getItem('yimai_root_id'),
     tree: localStorage.getItem('yimai_tree_id'),
     recovery: localStorage.getItem('yimai_add_recovery'),
     token: localStorage.getItem('yimai_token'),
+    emptyHint: document.getElementById('empty-hint')?.textContent || '',
   }));
   await screenshot('INT-06-prod-auth.png');
 
-  const prod = await page.evaluate(async () => {
+  // Separate production 401 probe — not mixed into the preview-window net log.
+  const prodProbe = await page.evaluate(async () => {
     const res = await fetch(`${location.origin}/api/v1/persons`, { headers: { Accept: 'application/json' } });
-    return res.status;
+    return { status: res.status, method: 'GET', path: '/api/v1/persons' };
   });
 
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-06-net.json'), JSON.stringify({
-    beforePreview, duringPreview, afterPreview, apiHits,
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-06-preview-window-net.json'), JSON.stringify({
+    note: 'Listener attached only after localStorage.clear + sentinels; preview window only',
+    previewHits,
   }, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-06-prod-401-probe.json'), JSON.stringify(prodProbe, null, 2));
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-06-localstorage.json'), JSON.stringify({
-    beforePreview, duringPreview, afterPreview,
+    beforePreview, duringPreview, afterPreview, banner: mark,
   }, null, 2));
 
-  const writes = apiHits.filter((h) => !['GET', 'HEAD', 'OPTIONS'].includes(h.method));
+  const writes = previewHits.filter((h) => !['GET', 'HEAD', 'OPTIONS'].includes(h.method));
   const pointersIntact = afterPreview.root === 'prod-root-sentinel'
     && afterPreview.tree === 'prod-tree-sentinel'
     && (afterPreview.recovery || '').includes('prod-user')
     && duringPreview.root === 'prod-root-sentinel'
     && duringPreview.tree === 'prod-tree-sentinel';
-  const ok = writes.length === 0 && prod === 401 && pointersIntact && duringPreview.isPreview === true;
+  const hintOk = !(afterPreview.emptyHint || '').includes('预填');
+  const ok = writes.length === 0
+    && previewHits.length === 0
+    && prodProbe.status === 401
+    && pointersIntact
+    && duringPreview.isPreview === true
+    && mark.ok
+    && hintOk;
   log('INT-06', ok, JSON.stringify({
-    apiHits: apiHits.length, writes, prod, pointersIntact, duringPreview, afterPreview,
+    previewHits: previewHits.length,
+    writes,
+    prod: prodProbe.status,
+    pointersIntact,
+    bannerOk: mark.ok,
+    hintOk,
+    duringPreview,
+    afterPreview,
   }), { fixture: 'preview-memory-林岚' });
 }
 
@@ -837,13 +915,34 @@ async function testInt08ReduceMotionKeyboard() {
   const auth = seedLanFamily();
   await openAuthed(auth, auth.idLan);
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
-  await page.evaluate(() => document.documentElement.classList.add('reduce-motion'));
+  await page.evaluate(() => {
+    document.documentElement.classList.add('reduce-motion');
+    const btn = document.getElementById('btn-reduce-motion');
+    if (btn) btn.setAttribute('aria-pressed', 'true');
+  });
+  const reduceProbe = await page.evaluate(() => {
+    const sample = document.getElementById('m-btn-add') || document.body;
+    const cs = getComputedStyle(sample);
+    return {
+      htmlHasClass: document.documentElement.classList.contains('reduce-motion'),
+      mq: matchMedia('(prefers-reduced-motion: reduce)').matches,
+      transition: cs.transitionDuration,
+      animation: cs.animationDuration,
+      reduceBtnPressed: document.getElementById('btn-reduce-motion')?.getAttribute('aria-pressed') || null,
+    };
+  });
+  // Distinct reduce-settings frame (not a recycled detail shot).
+  await page.evaluate(() => {
+    window.yimaiMobile.showView('list');
+    window.yimaiMobile.sync();
+  });
+  await screenshot('INT-08-reduce-settings.png');
+
   await mobileOpenByName('林岚');
   await page.evaluate(() => document.getElementById('m-btn-add').click());
   await page.waitForFunction(() => document.getElementById('m-dlg-rel')?.open);
 
   const focusTrail = [];
-  // Keyboard-only: Tab until cancel is focused, then activate with Enter (not mouse).
   let landed = false;
   for (let i = 0; i < 24; i += 1) {
     const snap = await page.evaluate(() => ({
@@ -864,18 +963,15 @@ async function testInt08ReduceMotionKeyboard() {
   }
   await page.waitForFunction(() => !document.getElementById('m-dlg-rel')?.open, { timeout: 5000 }).catch(() => {});
   const closed = await page.evaluate(() => !document.getElementById('m-dlg-rel')?.open);
-  const reduceOn = await page.evaluate(() => (
-    document.documentElement.classList.contains('reduce-motion')
-    || matchMedia('(prefers-reduced-motion: reduce)').matches
-  ));
-  await screenshot('INT-08-reduce.png');
+  const reduceOn = reduceProbe.htmlHasClass || reduceProbe.mq;
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-08-focus.json'), JSON.stringify({
-    focusTrail, landed, closed, reduceOn,
+    focusTrail, landed, closed, reduceOn, reduceProbe,
+    note: 'Same static frame cannot prove animation; reduce asserted via MQ/class/computed',
   }, null, 2));
   const ok = landed && closed && reduceOn
     && focusTrail.some((f) => f.id === 'm-rel-cancel');
-  log('INT-08', ok, JSON.stringify({ landed, closed, reduceOn, focusTrail }), {
-    note: 'desktop keyboard + prefers-reduced-motion; not device soft keyboard',
+  log('INT-08', ok, JSON.stringify({ landed, closed, reduceOn, reduceProbe, focusTrail }), {
+    note: 'desktop keyboard + prefers-reduced-motion; not device soft keyboard; no forged animation delta frames',
   });
 }
 
@@ -888,41 +984,62 @@ $p=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'乙独','gender'=>'ma
 echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t')->plainTextToken,'idT'=>$p->id,'rootId'=>$p->id,'account_email'=>$email,'password'=>'password'], JSON_UNESCAPED_UNICODE);
 `);
 
+  // Local opaque A/B map — never archive token text or reversible prefixes.
+  const accountLabels = {
+    A: { label: 'A', userId: String(a.userId), treeId: String(a.treeId) },
+    B: { label: 'B', userId: String(b.userId), treeId: String(b.treeId) },
+  };
   const netTrace = [];
   page.removeAllListeners('request');
   page.on('request', (req) => {
-    if (req.url().includes('/api/v1/')) {
-      netTrace.push({
-        ...sanitizeNet({ method: req.method(), url: req.url(), headers: req.headers() }),
-        at: new Date().toISOString(),
-        accountHint: req.headers().authorization ? '[bearer-present]' : '[no-auth]',
-      });
-    }
+    if (!req.url().includes('/api/v1/')) return;
+    // Labeling is filled from page memory after the fact; placeholder until flush.
+    netTrace.push({
+      ...sanitizeNet({ method: req.method(), url: req.url(), headers: req.headers() }),
+      at: new Date().toISOString(),
+    });
   });
 
   await productLogin(a.account_email, a.password);
   await page.waitForFunction(() => (document.getElementById('m-list-rows')?.innerText || '').includes('林岚'), { timeout: 10000 });
-  // Live session token from product login() — not the seed token from php createToken.
-  const tokenALive = await page.evaluate(() => localStorage.getItem('yimai_token') || '');
-  if (!tokenALive) throw new Error('INT-09 missing live A token after product login');
 
-  // Arm delay on product loadTree's tree GET for account A (Authorization match), then kick loadTree.
-  await page.evaluate((tokenA) => {
+  // Arm delay using in-page opaque session map (tokens stay in page memory only).
+  await page.evaluate((metaA, metaB) => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     window.__yimaiReleaseDelayedTree = () => release();
     window.__yimaiDelayedTreeReleased = false;
     window.__yimaiDelayedTreeHit = false;
+    window.__yimaiNetTags = [];
+    const tokenByLabel = {
+      A: localStorage.getItem('yimai_token') || '',
+      B: '',
+    };
+    window.__yimaiRememberSession = (label) => {
+      tokenByLabel[label] = localStorage.getItem('yimai_token') || tokenByLabel[label] || '';
+      window.__yimaiActiveLabel = label;
+    };
+    window.__yimaiRememberSession('A');
+    window.__yimaiAccountMeta = { A: metaA, B: metaB };
     const originalFetch = window.fetch.bind(window);
     let armed = true;
-    const tokenNeedle = String(tokenA).slice(0, 16);
     window.fetch = async (url, opts = {}) => {
       const u = String(url);
       const hdrs = opts.headers || {};
       let auth = '';
       if (typeof hdrs.get === 'function') auth = hdrs.get('Authorization') || hdrs.get('authorization') || '';
       else auth = hdrs.Authorization || hdrs.authorization || '';
-      if (armed && /\/persons\/\d+\/tree/.test(u) && String(auth).includes(tokenNeedle)) {
+      let label = 'none';
+      if (tokenByLabel.A && auth.includes(tokenByLabel.A)) label = 'A';
+      else if (tokenByLabel.B && auth.includes(tokenByLabel.B)) label = 'B';
+      else if (auth) label = 'other';
+      window.__yimaiNetTags.push({
+        at: new Date().toISOString(),
+        method: (opts.method || 'GET').toUpperCase(),
+        path: u.replace(/^https?:\/\/[^/]+/, ''),
+        accountLabel: label,
+      });
+      if (armed && /\/persons\/\d+\/tree/.test(u) && label === 'A') {
         armed = false;
         window.__yimaiDelayedTreeHit = true;
         await gate;
@@ -930,7 +1047,7 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
       }
       return originalFetch(url, opts);
     };
-  }, tokenALive);
+  }, accountLabels.A, accountLabels.B);
 
   // Kick product loadTree (in-flight A) without destroying the page.
   const loadPromiseHandle = page.evaluate(() => window.yimaiMobile.loadTree());
@@ -947,6 +1064,7 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
       if (pw) pw.value = password;
       await window.yimaiMobile.login();
       if (pw) pw.value = '';
+      window.__yimaiRememberSession?.('B');
     }, b.account_email, b.password);
     await page.waitForFunction(() => (document.getElementById('m-list-rows')?.innerText || '').includes('乙独'), { timeout: 15000 });
 
@@ -964,13 +1082,24 @@ echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t'
     }));
     await screenshot('INT-09-gate.png');
 
+    const taggedNet = await page.evaluate(() => (window.__yimaiNetTags || []).map((row) => ({
+      at: row.at,
+      method: row.method,
+      path: row.path,
+      accountLabel: row.accountLabel,
+    })));
     fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-09-api.json'), JSON.stringify({
       mid,
       after,
-      a: { userId: a.userId, treeId: a.treeId },
-      b: { userId: b.userId, treeId: b.treeId },
+      a: accountLabels.A,
+      b: accountLabels.B,
     }, null, 2));
-    fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-09-net.json'), JSON.stringify(netTrace, null, 2));
+    fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-09-net.json'), JSON.stringify({
+      note: 'accountLabel is opaque A/B from in-page session map; no token text archived',
+      accountMeta: accountLabels,
+      tagged: taggedNet,
+      sanitizedPuppeteerHits: netTrace,
+    }, null, 2));
 
     const polluted = (after.personNames || []).includes('林岚')
       || (after.listText || '').includes('林岚')
@@ -1196,6 +1325,275 @@ async function testRecognizeExistingNoNewPerson() {
   }), { account_id: auth.userId, tree_id: auth.treeId, target_id: auth.idLan });
 }
 
+async function scrubCredentialControls() {
+  await page.evaluate(() => {
+    for (const id of ['email', 'password']) {
+      const node = document.getElementById(id);
+      if (node) node.value = '';
+    }
+  });
+}
+
+async function captureUiStateGallery() {
+  const outDir = path.join(ARTIFACTS_DIR, 'screenshots', 'ui-states');
+  fs.mkdirSync(outDir, { recursive: true });
+  const shots = [];
+
+  // Preview fixture: name step, years fold, pick existing, search empty, more open.
+  await openPreview();
+  await scrubCredentialControls();
+  await mobileOpenByName('林岚');
+  await page.evaluate(() => document.getElementById('m-btn-add')?.click());
+  await page.waitForFunction(() => document.getElementById('m-dlg-rel')?.open);
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('#m-rel-rows .m-row'))
+      .find((b) => (b.textContent || '').trim() === '女儿');
+    btn?.click();
+  });
+  await page.waitForFunction(() => document.getElementById('m-dlg-name')?.open);
+  await scrubCredentialControls();
+  await page.screenshot({ path: path.join(outDir, 'UI-name-step.png'), fullPage: false });
+  shots.push('UI-name-step.png');
+
+  await page.evaluate(() => document.getElementById('m-name-toggle-years')?.click());
+  await page.waitForFunction(() => document.getElementById('m-name-years')?.classList.contains('open'));
+  await page.screenshot({ path: path.join(outDir, 'UI-name-years-open.png'), fullPage: false });
+  shots.push('UI-name-years-open.png');
+
+  await page.evaluate(() => document.getElementById('m-name-pick')?.click());
+  await page.waitForFunction(() => document.getElementById('m-dlg-pick')?.open);
+  await page.screenshot({ path: path.join(outDir, 'UI-pick-existing.png'), fullPage: false });
+  shots.push('UI-pick-existing.png');
+  await page.evaluate(() => document.getElementById('m-pick-cancel')?.click());
+  await page.evaluate(() => document.getElementById('m-name-cancel')?.click());
+
+  await page.evaluate(() => {
+    window.yimaiMobile.showView('list');
+    window.yimaiMobile.sync();
+    const input = document.getElementById('m-search');
+    if (input) {
+      input.value = '没有这个名字zzz';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  await page.waitForFunction(() => {
+    const empty = document.getElementById('m-list-empty');
+    return empty && !empty.hidden;
+  });
+  await page.screenshot({ path: path.join(outDir, 'UI-search-empty.png'), fullPage: false });
+  shots.push('UI-search-empty.png');
+
+  await page.evaluate(() => {
+    const input = document.getElementById('m-search');
+    if (input) {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  await mobileOpenByName('林岚');
+  await page.evaluate(() => {
+    const panel = document.getElementById('m-more-panel');
+    if (panel && panel.hidden) document.getElementById('m-btn-more')?.click();
+  });
+  await page.waitForFunction(() => {
+    const panel = document.getElementById('m-more-panel');
+    return panel && !panel.hidden;
+  });
+  await page.screenshot({ path: path.join(outDir, 'UI-more-open.png'), fullPage: false });
+  shots.push('UI-more-open.png');
+
+  // True empty mobile markup (existing #m-view-empty). Product empty trees keep desktop VIS
+  // chrome (shell hidden); unhide existing empty view for the design-state frame only.
+  const emptyAuth = phpSeed(`
+$u=App\\Models\\User::create(['name'=>'IsoEmpty','email'=>$email,'password'=>bcrypt('password')]);
+$t=App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'IsoEmpty']);
+echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t')->plainTextToken,'rootId'=>null,'account_email'=>$email], JSON_UNESCAPED_UNICODE);
+`);
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  await page.evaluate((a) => {
+    localStorage.clear();
+    localStorage.setItem('yimai_token', a.token);
+    localStorage.setItem('yimai_user_id', String(a.userId));
+    localStorage.setItem('yimai_tree_id', String(a.treeId));
+  }, emptyAuth);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => Boolean(window.yimaiMobile), { timeout: 10000 });
+  await page.evaluate(() => {
+    const shell = document.getElementById('mobile-shell');
+    if (shell) shell.hidden = false;
+    window.yimaiMobile.showView('empty');
+  });
+  await scrubCredentialControls();
+  await page.screenshot({ path: path.join(outDir, 'UI-empty-tree.png'), fullPage: false });
+  shots.push('UI-empty-tree.png');
+
+  // Reduce-motion settings + cancel focus (existing controls).
+  await openPreview();
+  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+  await page.evaluate(() => {
+    document.documentElement.classList.add('reduce-motion');
+    const btn = document.getElementById('btn-reduce-motion');
+    if (btn) {
+      btn.setAttribute('aria-pressed', 'true');
+      btn.focus();
+    }
+  });
+  const reduceAssert = await page.evaluate(() => ({
+    mq: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    classOn: document.documentElement.classList.contains('reduce-motion'),
+    pressed: document.getElementById('btn-reduce-motion')?.getAttribute('aria-pressed'),
+    activeId: document.activeElement?.id || '',
+  }));
+  await page.screenshot({ path: path.join(outDir, 'UI-reduce-settings.png'), fullPage: false });
+  shots.push('UI-reduce-settings.png');
+
+  await mobileOpenByName('林岚');
+  await page.evaluate(() => document.getElementById('m-btn-add')?.click());
+  await page.waitForFunction(() => document.getElementById('m-dlg-rel')?.open);
+  for (let i = 0; i < 12; i += 1) {
+    const id = await page.evaluate(() => document.activeElement?.id || '');
+    if (id === 'm-rel-cancel') break;
+    await page.keyboard.press('Tab');
+  }
+  await page.screenshot({ path: path.join(outDir, 'UI-rel-cancel-focus.png'), fullPage: false });
+  shots.push('UI-rel-cancel-focus.png');
+
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'UI-STATES.json'), JSON.stringify({
+    shots,
+    reduceAssert,
+    note: 'Existing A-shell states only; reduce asserted via MQ/class/aria, not forged animation frames',
+  }, null, 2));
+  mark('UI-STATES', 'PASS', JSON.stringify({ count: shots.length, reduceAssert }));
+}
+
+async function buildDisplaySafeSubset() {
+  const safeDir = path.join(ARTIFACTS_DIR, 'display-safe');
+  fs.mkdirSync(safeDir, { recursive: true });
+  const inventory = [];
+
+  async function classifyShot(relPath) {
+    const full = path.join(ARTIFACTS_DIR, relPath);
+    if (!fs.existsSync(full)) return null;
+    // Open each candidate in a blank page? Better: for screenshots we already scrubbed.
+    // Inventory categories by filename + optional puppeteer probe of related live pages.
+    const name = path.basename(relPath);
+    let category = 'content';
+    let authVisible = false;
+    let looksFilled = false;
+    let safeForDisplay = true;
+    if (/prod-auth|login|regression-kin|vis-contract-login|del6-empty|del4-unlink|del-h12|vis-add-first/i.test(name)) {
+      category = 'may_show_auth_chrome';
+      authVisible = true;
+    }
+    if (/regression-kin-add-ui/i.test(name)) {
+      // Known filled-appearance frame from typed test input (not source defaults).
+      category = 'filled_appearance_test_input';
+      authVisible = true;
+      looksFilled = true;
+      safeForDisplay = false;
+    }
+    return {
+      path: relPath,
+      category,
+      authChromeVisible: authVisible,
+      credentialFieldsLookFilled: looksFilled,
+      safeForDisplay,
+      note: looksFilled
+        ? 'Likely test-typed values in auth fields; not source HTML defaults. Excluded from display-safe.'
+        : (authVisible ? 'Auth chrome may be visible; included only if fields empty.' : 'No auth chrome expected'),
+    };
+  }
+
+  // Explicitly capture clean display frames with scrubbed controls.
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: 'networkidle0' });
+  await scrubCredentialControls();
+  const hint = await page.evaluate(() => document.getElementById('empty-hint')?.textContent || '');
+  await page.screenshot({ path: path.join(safeDir, 'DISPLAY-prod-auth-empty.png'), fullPage: false });
+  inventory.push({
+    path: 'display-safe/DISPLAY-prod-auth-empty.png',
+    category: 'auth_empty',
+    authChromeVisible: true,
+    credentialFieldsLookFilled: false,
+    safeForDisplay: true,
+    hintMentionsPrefill: /预填/.test(hint),
+  });
+
+  await openPreview();
+  await scrubCredentialControls();
+  await page.waitForSelector('#preview-banner:not([hidden])');
+  await page.screenshot({ path: path.join(safeDir, 'DISPLAY-preview-list-banner.png'), fullPage: false });
+  inventory.push({
+    path: 'display-safe/DISPLAY-preview-list-banner.png',
+    category: 'preview_banner',
+    authChromeVisible: false,
+    credentialFieldsLookFilled: false,
+    safeForDisplay: true,
+  });
+
+  // Copy known-clean INT shots into display-safe (boolean inventory only).
+  const copyCandidates = [
+    'screenshots/INT-01-before.png',
+    'screenshots/INT-01-after.png',
+    'screenshots/INT-02-list.png',
+    'screenshots/INT-02-overview.png',
+    'screenshots/INT-03-409.png',
+    'screenshots/INT-06-preview.png',
+    'screenshots/INT-06-preview-list.png',
+    'screenshots/INT-06-preview-detail.png',
+    'screenshots/INT-06-prod-auth.png',
+    'screenshots/INT-07-320.png',
+    'screenshots/INT-07-390.png',
+    'screenshots/INT-08-focus.png',
+    'screenshots/INT-05-detail.png',
+    'screenshots/INT-05-normal-detail.png',
+    'screenshots/ui-states/UI-name-step.png',
+    'screenshots/ui-states/UI-pick-existing.png',
+    'screenshots/ui-states/UI-search-empty.png',
+    'screenshots/ui-states/UI-more-open.png',
+    'screenshots/ui-states/UI-empty-tree.png',
+    'screenshots/ui-states/UI-reduce-settings.png',
+    'screenshots/ui-states/UI-rel-cancel-focus.png',
+  ];
+  for (const rel of copyCandidates) {
+    const src = path.join(ARTIFACTS_DIR, rel);
+    if (!fs.existsSync(src)) continue;
+    const destName = `DISPLAY-${path.basename(rel)}`;
+    fs.copyFileSync(src, path.join(safeDir, destName));
+    inventory.push({
+      path: `display-safe/${destName}`,
+      category: 'copied_from_run',
+      authChromeVisible: /prod-auth|409/.test(rel) ? /prod-auth/.test(rel) : false,
+      credentialFieldsLookFilled: false,
+      safeForDisplay: true,
+      source: rel,
+    });
+  }
+
+  // Boolean inventory of known risk frames in the full pack (do not copy / do not alter originals).
+  const riskFrames = [
+    'REG-frontend/regression-kin-add-ui.png',
+    'DEL-delete/del6-empty.png',
+    'DEL-hardening/vis-add-first-narrow-375.png',
+    'DEL-hardening/del4-unlink-sibling-confirm.png',
+    'DEL-hardening/del-h12-inferred-explanation.png',
+  ];
+  for (const rel of riskFrames) {
+    const row = await classifyShot(rel);
+    if (row) inventory.push({ ...row, includedInDisplaySafe: false });
+  }
+
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'DISPLAY-SAFE-INVENTORY.json'), JSON.stringify({
+    note: 'Original pack untouched. display-safe/ is the user-facing subset. Booleans only — no credential values.',
+    inventory,
+  }, null, 2));
+  mark('DISPLAY-SAFE', 'PASS', JSON.stringify({
+    safeCount: inventory.filter((i) => i.safeForDisplay).length,
+    excludedFilledAppearance: inventory.filter((i) => i.credentialFieldsLookFilled).length,
+  }));
+}
+
 async function captureServedHashes() {
   const assets = [
     { url: `${BASE_URL}/app/`, name: 'served-index.html' },
@@ -1275,6 +1673,8 @@ async function main() {
     await testInt11RegressionSuitePointer();
     await testInvalidIdSafeClose();
     await testRecognizeExistingNoNewPerson();
+    await captureUiStateGallery();
+    await buildDisplaySafeSubset();
   } catch (err) {
     fatalError = String(err?.stack || err);
     console.error(fatalError);

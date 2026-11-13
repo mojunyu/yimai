@@ -1063,7 +1063,7 @@ function render() {
   el.empty.classList.toggle('hidden', nodes.length > 0);
   document.getElementById('empty-hint').textContent = state.token
     ? '家里还没有记下亲人。点右上角「添加」，写下第一位就好。'
-    : '用上方预填的演示账号登录，翻开这本家谱。';
+    : '请在上方登录后，翻开这本家谱。预览免登录，正式记下需登录。';
   setAuthed(Boolean(state.token));
 
   const svg = d3.select(el.canvas);
@@ -1876,7 +1876,11 @@ async function afterSuccessfulCorrection(op) {
     if (op.op === 'unlink_sibling') {
       const still = siblingsOf(subjectId).find((s) => sameId(s.id, op.counterpartId));
       if (still && (still.source === 'inferred' || still.source === 'both')) {
-        showError(el.sheetError, '手动添加的兄弟姐妹关系记录已移除。因共同父母仍显示为兄弟姐妹。');
+        const msg = '手动添加的兄弟姐妹关系记录已移除。因共同父母仍显示为兄弟姐妹。';
+        showError(el.sheetError, msg);
+        setMobileFeedback(msg);
+        showMobileView('detail');
+        syncMobileUi();
       }
     }
   }
@@ -2066,10 +2070,9 @@ function openSheet(node) {
   const siblingLine = siblings.length ? `兄弟姐妹有${namesOf(siblings)}。` : '兄弟姐妹还没有记下。';
   const spouseLine = rel.spouses.length ? `配偶是${namesOf(rel.spouses)}。` : '配偶还没有记下。';
   const childLine = rel.children.length ? `子女有${namesOf(rel.children)}。` : '子女还没有记下。';
-  const inferredSiblingNote = siblings.some((s) => s.source === 'inferred' || s.source === 'both')
-    ? '<p class="inferred-sibling-note">因共同父母仍显示为兄弟姐妹。</p>'
-    : '';
-  el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>${inferredSiblingNote}`;
+  // Do not permanently footnote co-parent inference on every detail view.
+  // That explanation is reserved for post-unlink correction feedback.
+  el.sheetSummary.innerHTML = `<p>${intro}</p><p class="biography-kin">${[parentsLine, siblingLine, spouseLine, childLine].map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</p>`;
   el.setRoot.dataset.personId = String(node.id);
   renderCorrectionList(node);
   if (el.deleteSection) el.deleteSection.classList.remove('hidden');
@@ -2699,6 +2702,13 @@ function updateMobileShellVisibility() {
   mel.shell.hidden = !show;
   if (mel.previewBanner) mel.previewBanner.hidden = !state.previewMode;
   document.body.classList.toggle('is-preview', state.previewMode);
+  if (state.previewMode && mel.previewBanner && !mel.previewBanner.hidden) {
+    // Keep fixed shell below the always-on preview mark (list/detail/overview).
+    const h = Math.max(44, mel.previewBanner.getBoundingClientRect().height || 52);
+    document.body.style.setProperty('--preview-banner-offset', `${Math.ceil(h)}px`);
+  } else {
+    document.body.style.removeProperty('--preview-banner-offset');
+  }
 }
 
 function filteredPersons(query) {
@@ -2773,16 +2783,12 @@ function syncMobileDetail() {
   setMobileFeedback(state.mobile.feedback);
   const rel = relationsFromEdges(person.id);
   const siblings = siblingsOf(person.id);
-  const inferredSiblingNote = siblings.some((s) => s.source === 'inferred' || s.source === 'both')
-    ? '<p class="m-muted m-pad">因共同父母仍显示为兄弟姐妹。</p>'
-    : '';
   mel.detailKin.innerHTML = [
     kinGroupHtml('父亲', rel.parentSlots.father ? [rel.parentSlots.father] : []),
     kinGroupHtml('母亲', rel.parentSlots.mother ? [rel.parentSlots.mother] : []),
     kinGroupHtml('配偶', rel.spouses),
     kinGroupHtml('子女', rel.children),
     kinGroupHtml('兄弟姐妹', siblings),
-    inferredSiblingNote,
   ].join('') || '<p class="m-empty-hint">近亲还没有记下</p>';
   mel.detailKin.querySelectorAll('[data-open-id]').forEach((node) => {
     node.addEventListener('click', () => mobileOpenPerson(node.dataset.openId));
