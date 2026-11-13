@@ -1,11 +1,17 @@
 /**
  * 一脉 frontend: browse the tree from API JSON, and add/recognize kin in plain Chinese.
  * Canvas edges come only from GET /api/v1/persons/{id}/tree — never inferred here.
+ * Mobile-first A shell shares the same person ids; preview uses in-memory fixture only.
  */
+
+import { createPreviewFixture } from './preview-fixture.js';
 
 const API_BASE = `${window.location.origin}/api/v1`;
 const TOKEN_KEY = 'yimai_token';
 const ROOT_KEY = 'yimai_root_id';
+const PREVIEW_QUERY = new URLSearchParams(window.location.search).get('preview');
+const IS_PREVIEW = PREVIEW_QUERY === '1' || PREVIEW_QUERY === 'fixture';
+const previewFixture = IS_PREVIEW ? createPreviewFixture() : null;
 
 const ERROR_ZH = {
   'Parent assignment would create a cycle.': '这样认下来会绕成一圈，亲疏就乱了，所以没有保存。',
@@ -25,10 +31,10 @@ const TREE_KEY = 'yimai_tree_id';
 const RECOVERY_KEY = 'yimai_add_recovery';
 
 const state = {
-  token: localStorage.getItem(TOKEN_KEY) || '',
-  userId: localStorage.getItem(USER_KEY) || '',
-  treeId: localStorage.getItem(TREE_KEY) || '',
-  rootId: localStorage.getItem(ROOT_KEY) || '',
+  token: IS_PREVIEW ? 'preview-local' : (localStorage.getItem(TOKEN_KEY) || ''),
+  userId: IS_PREVIEW ? String(previewFixture.userId) : (localStorage.getItem(USER_KEY) || ''),
+  treeId: IS_PREVIEW ? String(previewFixture.treeId) : (localStorage.getItem(TREE_KEY) || ''),
+  rootId: IS_PREVIEW ? String(previewFixture.rootId) : (localStorage.getItem(ROOT_KEY) || ''),
   tree: null,
   persons: [],
   selectedId: null,
@@ -41,6 +47,17 @@ const state = {
   /** Monotonic generation so in-flight awaits cannot apply after login/invalidate. */
   sheetOpGen: 0,
   confirmTrigger: null,
+  previewMode: IS_PREVIEW,
+  mobile: {
+    view: 'list',
+    search: '',
+    pickSearch: '',
+    feedback: '',
+    moreOpen: false,
+    returnToAnchor: false,
+    existingId: '',
+    listScroll: 0,
+  },
 };
 
 const PARTIAL_SAVE_MSG = '人已记下，关系未保存';
@@ -303,6 +320,20 @@ function isDefiniteClientRejection(err) {
 }
 
 async function api(path, options = {}) {
+  if (state.previewMode && previewFixture) {
+    try {
+      return await previewFixture.handle(path, options);
+    } catch (err) {
+      const status = Number(err?.status) || 0;
+      const body = err?.body || { message: err?.message || '预览操作失败' };
+      const detail = formatApiError(body, err?.message || '预览操作失败');
+      throw makeApiError(detail, {
+        status,
+        body,
+        uncertain: false,
+      });
+    }
+  }
   let res;
   try {
     res = await fetch(`${API_BASE}${path}`, {
@@ -368,6 +399,7 @@ function updateStats() {
 }
 
 function setAuthed(on) {
+  document.body.classList.toggle('is-authed', Boolean(on) && !state.previewMode);
   el.reload.disabled = !on;
   el.add.disabled = !on;
 }
@@ -630,6 +662,9 @@ async function resumeRecoveryUi() {
 }
 
 async function login() {
+  if (state.previewMode) {
+    throw new Error('预览模式请使用虚构数据，不走登录。');
+  }
   const body = {
     email: el.email.value.trim(),
     password: el.password.value,
@@ -659,6 +694,8 @@ async function login() {
   syncRootWithPersons();
   await loadTree();
   await resumeRecoveryUi();
+  showMobileView(state.persons.length ? 'list' : 'empty');
+  syncMobileUi();
 }
 
 async function loadTree() {
@@ -711,6 +748,7 @@ async function loadTree() {
     const person = findPerson(state.selectedId);
     if (person) openSheet(person);
   }
+  syncMobileUi();
 }
 
 function childParentRole(anchor) {
@@ -1085,7 +1123,7 @@ function render() {
           .attr('aria-pressed', (node) => String(sameId(node.id, d.id)));
         return;
       }
-      openSheet(findPerson(d.id) || d);
+      mobileOpenPerson(d.id);
     })
     .on('keydown', (event, d) => {
       if (event.key === 'Enter' || event.key === ' ') {
@@ -1094,7 +1132,7 @@ function render() {
           state.selectedId = d.id;
           return;
         }
-        openSheet(findPerson(d.id) || d);
+        mobileOpenPerson(d.id);
       }
     });
 
@@ -1123,6 +1161,7 @@ function render() {
     .attr('x', 15)
     .attr('y', 76)
     .text((d) => yearsLabel(d));
+  syncMobileUi();
 }
 
 function relationsFromEdges(personId) {
@@ -1693,7 +1732,7 @@ function showDeleteBlocked409(op, body) {
       onClick: () => {
         const live = findPerson(child.id);
         hideConfirmLayer();
-        if (live) openSheet(live);
+        if (live) mobileOpenPerson(live.id);
       },
     });
   }
@@ -1996,6 +2035,7 @@ function openSheet(node) {
   if (el.correctSection) el.correctSection.classList.remove('hidden');
   if (personChanged) el.sheet.scrollTop = 0;
   showRecoveryGuidance();
+  syncMobileDetail();
 }
 
 function closeSheet() {
@@ -2170,9 +2210,24 @@ function buildRecoveryDraft({
  * window (refresh/navigation bypass catch). Clear only after completion.
  */
 async function finishAddSuccess(target) {
+  const preferAnchor = Boolean(state.mobile?.returnToAnchor);
+  const anchorId = state.addIntent.anchorId;
+  const kinKey = state.addIntent.kin || state.recovery?.kin || '';
+  const kinWord = KIN[kinKey]?.word || '家人';
   await loadTree();
   clearRecovery();
-  openSheet(findPerson(target.id) || target);
+  const anchor = preferAnchor && anchorId ? findPerson(anchorId) : null;
+  const focus = anchor || findPerson(target.id) || target;
+  state.mobile.returnToAnchor = false;
+  openSheet(focus);
+  if (preferAnchor && anchor) {
+    const added = findPerson(target.id) || target;
+    setMobileFeedback(added?.name
+      ? `已把${added.name}记为${kinWord}。`
+      : `已记下${kinWord}。`);
+    showMobileView('detail');
+  }
+  syncMobileUi();
 }
 
 async function submitAdd(event) {
@@ -2499,6 +2554,630 @@ async function submitAdd(event) {
   }
 }
 
+/* ——— Mobile-first A shell (shares state.selectedId / persons / tree) ——— */
+
+const mel = {
+  shell: document.getElementById('mobile-shell'),
+  list: document.getElementById('m-view-list'),
+  detail: document.getElementById('m-view-detail'),
+  overview: document.getElementById('m-view-overview'),
+  empty: document.getElementById('m-view-empty'),
+  search: document.getElementById('m-search'),
+  searchClear: document.getElementById('m-search-clear'),
+  listRows: document.getElementById('m-list-rows'),
+  listEmpty: document.getElementById('m-list-empty'),
+  listStatus: document.getElementById('m-list-status'),
+  detailName: document.getElementById('m-detail-name'),
+  detailPuhao: document.getElementById('m-detail-puhao'),
+  detailFeedback: document.getElementById('m-detail-feedback'),
+  detailKin: document.getElementById('m-detail-kin'),
+  morePanel: document.getElementById('m-more-panel'),
+  moreRows: document.getElementById('m-more-rows'),
+  moreBtn: document.getElementById('m-btn-more'),
+  overviewBody: document.getElementById('m-overview-body'),
+  dlgRel: document.getElementById('m-dlg-rel'),
+  relTitle: document.getElementById('m-rel-title'),
+  relRows: document.getElementById('m-rel-rows'),
+  relError: document.getElementById('m-rel-error'),
+  dlgName: document.getElementById('m-dlg-name'),
+  nameTitle: document.getElementById('m-name-title'),
+  nameInput: document.getElementById('m-name-input'),
+  nameError: document.getElementById('m-name-error'),
+  nameNew: document.getElementById('m-name-new'),
+  nameExisting: document.getElementById('m-name-existing'),
+  nameExistingLabel: document.getElementById('m-name-existing-label'),
+  nameYears: document.getElementById('m-name-years'),
+  nameBirth: document.getElementById('m-name-birth'),
+  nameDeath: document.getElementById('m-name-death'),
+  dlgPick: document.getElementById('m-dlg-pick'),
+  pickSearch: document.getElementById('m-pick-search'),
+  pickRows: document.getElementById('m-pick-rows'),
+  pickEmpty: document.getElementById('m-pick-empty'),
+  previewBanner: document.getElementById('preview-banner'),
+};
+
+const MOBILE_RELATIONS = [
+  { key: 'father', group: '父母', label: '父亲' },
+  { key: 'mother', group: '父母', label: '母亲' },
+  { key: 'husband', group: '配偶', label: '丈夫' },
+  { key: 'wife', group: '配偶', label: '妻子' },
+  { key: 'son', group: '子女', label: '儿子' },
+  { key: 'daughter', group: '子女', label: '女儿' },
+  { key: 'elder_brother', group: '兄弟姐妹', label: '哥哥' },
+  { key: 'elder_sister', group: '兄弟姐妹', label: '姐姐' },
+  { key: 'younger_brother', group: '兄弟姐妹', label: '弟弟' },
+  { key: 'younger_sister', group: '兄弟姐妹', label: '妹妹' },
+];
+
+function parsePersonId(raw) {
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw > 0) return raw;
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (/^[1-9]\d*$/.test(t)) {
+      const n = Number(t);
+      if (Number.isInteger(n) && n > 0 && String(n) === t) return n;
+    }
+  }
+  return null;
+}
+
+function sameNameNeedsPuhao(name) {
+  const n = String(name || '').trim();
+  return state.persons.filter((p) => p.name === n).length > 1;
+}
+
+function mobileDisplayName(person, { forcePuhao = false } = {}) {
+  if (!person) return '';
+  if (forcePuhao || sameNameNeedsPuhao(person.name)) {
+    return `${person.name}（谱号 ${person.id}）`;
+  }
+  return person.name;
+}
+
+function setMobileFeedback(text) {
+  state.mobile.feedback = text || '';
+  if (!mel.detailFeedback) return;
+  if (!text) {
+    mel.detailFeedback.hidden = true;
+    mel.detailFeedback.textContent = '';
+    return;
+  }
+  mel.detailFeedback.hidden = false;
+  mel.detailFeedback.textContent = text;
+}
+
+function showMobileView(view) {
+  state.mobile.view = view;
+  if (!mel.shell) return;
+  mel.list.hidden = view !== 'list';
+  mel.detail.hidden = view !== 'detail';
+  mel.overview.hidden = view !== 'overview';
+  mel.empty.hidden = view !== 'empty';
+}
+
+function updateMobileShellVisibility() {
+  if (!mel.shell) return;
+  const show = Boolean(state.token) || state.previewMode;
+  mel.shell.hidden = !show;
+  if (mel.previewBanner) mel.previewBanner.hidden = !state.previewMode;
+  document.body.classList.toggle('is-preview', state.previewMode);
+}
+
+function filteredPersons(query) {
+  const q = String(query || '').trim();
+  const list = state.persons.slice().sort((a, b) => Number(a.id) - Number(b.id));
+  if (!q) return list;
+  return list.filter((p) => String(p.name).includes(q));
+}
+
+function renderMobileList() {
+  if (!mel.listRows) return;
+  const rows = filteredPersons(state.mobile.search);
+  mel.listRows.innerHTML = '';
+  if (mel.searchClear) mel.searchClear.hidden = !String(state.mobile.search || '').trim();
+  if (mel.listStatus) {
+    mel.listStatus.textContent = state.persons.length
+      ? `${state.persons.length} 位家人`
+      : '';
+  }
+  if (!state.persons.length) {
+    showMobileView('empty');
+    return;
+  }
+  if (state.mobile.view === 'empty') showMobileView('list');
+  if (!rows.length) {
+    if (mel.listEmpty) {
+      mel.listEmpty.hidden = false;
+      mel.listEmpty.textContent = '没有叫这个名字的人';
+    }
+    return;
+  }
+  if (mel.listEmpty) mel.listEmpty.hidden = true;
+  for (const person of rows) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'm-row';
+    btn.dataset.openId = String(person.id);
+    const force = sameNameNeedsPuhao(person.name);
+    btn.innerHTML = `<span class="m-lead"><span>${escapeHtml(person.name)}</span>${
+      force ? `<span class="m-meta">谱号 ${escapeHtml(String(person.id))}</span>` : ''
+    }</span><span class="m-chev" aria-hidden="true">›</span>`;
+    btn.addEventListener('click', () => mobileOpenPerson(person.id));
+    mel.listRows.appendChild(btn);
+  }
+}
+
+function kinGroupHtml(title, people, { openable = true } = {}) {
+  if (!people.length) return '';
+  const rows = people.map((p) => {
+    const label = mobileDisplayName(p, { forcePuhao: sameNameNeedsPuhao(p.name) });
+    if (!openable) {
+      return `<div class="m-row"><span class="m-lead"><span>${escapeHtml(label)}</span></span></div>`;
+    }
+    return `<button type="button" class="m-row" data-open-id="${escapeHtml(String(p.id))}"><span class="m-lead"><span>${escapeHtml(label)}</span></span><span class="m-chev" aria-hidden="true">›</span></button>`;
+  }).join('');
+  return `<div class="m-kin-block"><p class="m-sec-label">${escapeHtml(title)}</p><div class="m-group">${rows}</div></div>`;
+}
+
+function syncMobileDetail() {
+  if (!mel.detailName) return;
+  const person = findPerson(state.selectedId);
+  if (!person) {
+    if (!state.persons.length) showMobileView('empty');
+    return;
+  }
+  mel.detailName.textContent = person.name;
+  if (mel.detailPuhao) {
+    const showPuhao = sameNameNeedsPuhao(person.name);
+    mel.detailPuhao.hidden = !showPuhao;
+    mel.detailPuhao.textContent = showPuhao ? `谱号 ${person.id}` : '';
+  }
+  setMobileFeedback(state.mobile.feedback);
+  const rel = relationsFromEdges(person.id);
+  const siblings = siblingsOf(person.id);
+  mel.detailKin.innerHTML = [
+    kinGroupHtml('父亲', rel.parentSlots.father ? [rel.parentSlots.father] : []),
+    kinGroupHtml('母亲', rel.parentSlots.mother ? [rel.parentSlots.mother] : []),
+    kinGroupHtml('配偶', rel.spouses),
+    kinGroupHtml('子女', rel.children),
+    kinGroupHtml('兄弟姐妹', siblings),
+  ].join('') || '<p class="m-empty-hint">近亲还没有记下</p>';
+  mel.detailKin.querySelectorAll('[data-open-id]').forEach((node) => {
+    node.addEventListener('click', () => mobileOpenPerson(node.dataset.openId));
+  });
+  renderMobileMore(person);
+}
+
+function renderMobileMore(person) {
+  if (!mel.moreRows) return;
+  const rel = relationsFromEdges(person.id);
+  const siblings = siblingsOf(person.id);
+  const rows = [];
+  if (rel.parentSlots.father) {
+    rows.push({
+      label: `更正父亲：去掉 ${mobileDisplayName(rel.parentSlots.father, { forcePuhao: true })}`,
+      className: 'm-row action',
+      onClick: () => beginClearParent(person, 'father_id', rel.parentSlots.father),
+    });
+  }
+  if (rel.parentSlots.mother) {
+    rows.push({
+      label: `更正母亲：去掉 ${mobileDisplayName(rel.parentSlots.mother, { forcePuhao: true })}`,
+      className: 'm-row action',
+      onClick: () => beginClearParent(person, 'mother_id', rel.parentSlots.mother),
+    });
+  }
+  for (const spouse of rel.spouses) {
+    rows.push({
+      label: `解除夫妻：${mobileDisplayName(spouse, { forcePuhao: true })}`,
+      className: 'm-row action',
+      onClick: () => beginUnlinkSpouse(person, spouse),
+    });
+  }
+  for (const sib of siblings) {
+    if (sib.link_id == null || (sib.source !== 'explicit' && sib.source !== 'both')) continue;
+    rows.push({
+      label: `移除显式兄妹：${mobileDisplayName(sib, { forcePuhao: true })}`,
+      className: 'm-row action',
+      onClick: () => beginUnlinkSibling(person, sib),
+    });
+  }
+  rows.push({
+    label: '删除此人记录',
+    className: 'm-row danger',
+    onClick: (event) => beginDeletePerson(person, event.currentTarget),
+  });
+  mel.moreRows.innerHTML = '';
+  for (const row of rows) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = row.className;
+    btn.textContent = row.label;
+    btn.addEventListener('click', (event) => row.onClick(event));
+    mel.moreRows.appendChild(btn);
+  }
+}
+
+function renderMobileOverview() {
+  if (!mel.overviewBody) return;
+  const byGen = new Map();
+  for (const p of state.persons) {
+    const g = p.generation ?? 0;
+    if (!byGen.has(g)) byGen.set(g, []);
+    byGen.get(g).push(p);
+  }
+  const gens = Array.from(byGen.keys()).sort((a, b) => a - b);
+  mel.overviewBody.innerHTML = '';
+  for (const g of gens) {
+    const block = document.createElement('div');
+    block.className = 'm-overview-block';
+    const label = document.createElement('p');
+    label.className = 'm-sec-label';
+    label.textContent = `第 ${g} 代`;
+    const group = document.createElement('div');
+    group.className = 'm-group';
+    for (const person of byGen.get(g).sort((a, b) => Number(a.id) - Number(b.id))) {
+      const rel = relationsFromEdges(person.id);
+      const siblings = siblingsOf(person.id);
+      const bits = [];
+      if (rel.parentSlots.father) bits.push(`父 ${rel.parentSlots.father.name}`);
+      if (rel.parentSlots.mother) bits.push(`母 ${rel.parentSlots.mother.name}`);
+      if (rel.spouses.length) bits.push(`配偶 ${rel.spouses.map((s) => s.name).join('、')}`);
+      if (rel.children.length) bits.push(`子女 ${rel.children.map((c) => c.name).join('、')}`);
+      if (siblings.length) bits.push(`兄弟姐妹 ${siblings.map((s) => s.name).join('、')}`);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'm-row';
+      btn.innerHTML = `<span class="m-lead"><span>${escapeHtml(mobileDisplayName(person, { forcePuhao: sameNameNeedsPuhao(person.name) }))}</span><span class="m-meta">${escapeHtml(bits.join(' · ') || '关系未记')}</span></span><span class="m-chev" aria-hidden="true">›</span>`;
+      btn.addEventListener('click', () => mobileOpenPerson(person.id));
+      group.appendChild(btn);
+    }
+    block.appendChild(label);
+    block.appendChild(group);
+    mel.overviewBody.appendChild(block);
+  }
+}
+
+function syncMobileUi() {
+  updateMobileShellVisibility();
+  if (!state.token && !state.previewMode) return;
+  if (!state.persons.length) {
+    showMobileView('empty');
+    return;
+  }
+  if (state.mobile.view === 'empty') showMobileView('list');
+  renderMobileList();
+  if (state.selectedId && findPerson(state.selectedId)) syncMobileDetail();
+  else if (state.selectedId && !findPerson(state.selectedId)) {
+    // Invalid selected id: safe close (PM INT-2 / DEL-6 spirit).
+    state.selectedId = null;
+    setMobileFeedback('');
+    if (state.mobile.view === 'detail') showMobileView('list');
+  }
+  if (state.mobile.view === 'overview') renderMobileOverview();
+}
+
+function mobileOpenPerson(id) {
+  const pid = parsePersonId(id);
+  const person = pid ? findPerson(pid) : null;
+  if (!person) {
+    state.selectedId = null;
+    setMobileFeedback('');
+    showMobileView(state.persons.length ? 'list' : 'empty');
+    syncMobileUi();
+    return;
+  }
+  state.mobile.feedback = '';
+  state.mobile.moreOpen = false;
+  if (mel.morePanel) mel.morePanel.hidden = true;
+  if (mel.moreBtn) mel.moreBtn.setAttribute('aria-expanded', 'false');
+  showMobileView('detail');
+  openSheet(person);
+}
+
+function closeMobileDialogs() {
+  mel.dlgRel?.close?.();
+  mel.dlgName?.close?.();
+  mel.dlgPick?.close?.();
+}
+
+function mobileStartAdd() {
+  const anchor = findPerson(state.selectedId);
+  if (!anchor) return;
+  state.mobile.existingId = '';
+  if (mel.relError) {
+    mel.relError.hidden = true;
+    mel.relError.textContent = '';
+  }
+  mel.relTitle.textContent = `给${anchor.name}添家人`;
+  mel.relRows.innerHTML = '';
+  let lastGroup = '';
+  for (const rel of MOBILE_RELATIONS) {
+    if (rel.group !== lastGroup) {
+      const lab = document.createElement('p');
+      lab.className = 'm-sec-label';
+      lab.textContent = rel.group;
+      mel.relRows.appendChild(lab);
+      lastGroup = rel.group;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'm-row action';
+    btn.textContent = rel.label;
+    btn.addEventListener('click', () => mobileChooseRelation(rel.key));
+    mel.relRows.appendChild(btn);
+  }
+  mel.dlgRel?.showModal?.();
+}
+
+function mobileChooseRelation(kinKey) {
+  const anchor = findPerson(state.selectedId);
+  const kin = KIN[kinKey];
+  if (!anchor || !kin) return;
+  const rel = relationsFromEdges(anchor.id);
+  if (kinKey === 'father' && rel.parentSlots.father) {
+    mel.relError.hidden = false;
+    mel.relError.textContent = `已有父亲，不能覆盖。请到「更多」更正${anchor.name}的父母。`;
+    return;
+  }
+  if (kinKey === 'mother' && rel.parentSlots.mother) {
+    mel.relError.hidden = false;
+    mel.relError.textContent = `已有母亲，不能覆盖。请到「更多」更正${anchor.name}的父母。`;
+    return;
+  }
+  if ((kinKey === 'husband' || kinKey === 'wife') && rel.spouses.length) {
+    mel.relError.hidden = false;
+    mel.relError.textContent = '已有配偶，请先在「更多」解除现有夫妻关系。';
+    return;
+  }
+  mel.dlgRel?.close?.();
+  showAddFormForKin(kinKey, anchor);
+  state.mobile.returnToAnchor = true;
+  state.mobile.existingId = '';
+  mel.nameTitle.textContent = `${anchor.name}的${kin.word}`;
+  mel.nameInput.value = '';
+  mel.nameBirth.value = '';
+  mel.nameDeath.value = '';
+  mel.nameYears.classList.remove('open');
+  mel.nameNew.hidden = false;
+  mel.nameExisting.hidden = true;
+  mel.nameError.hidden = true;
+  mel.nameError.textContent = '';
+  mel.dlgName?.showModal?.();
+  mel.nameInput?.focus?.();
+}
+
+function mobileSetExisting(person) {
+  state.mobile.existingId = String(person.id);
+  mel.nameNew.hidden = true;
+  mel.nameExisting.hidden = false;
+  mel.nameExistingLabel.textContent = `已选择：${mobileDisplayName(person, { forcePuhao: true })}`;
+  mel.nameInput.value = person.name;
+  mel.dlgPick?.close?.();
+}
+
+function mobileClearExisting() {
+  state.mobile.existingId = '';
+  mel.nameNew.hidden = false;
+  mel.nameExisting.hidden = true;
+  mel.nameInput.value = '';
+}
+
+function mobileCandidatesForExisting() {
+  const anchor = findPerson(state.addIntent.anchorId || state.selectedId);
+  const kinKey = state.addIntent.kin;
+  if (!anchor || !kinKey) return [];
+  const rel = relationsFromEdges(anchor.id);
+  const q = String(state.mobile.pickSearch || '').trim();
+  return state.persons.filter((p) => {
+    if (sameId(p.id, anchor.id)) return false;
+    if (kinKey === 'father' && rel.parentSlots.father && sameId(rel.parentSlots.father.id, p.id)) return false;
+    if (kinKey === 'mother' && rel.parentSlots.mother && sameId(rel.parentSlots.mother.id, p.id)) return false;
+    if ((kinKey === 'husband' || kinKey === 'wife') && rel.spouses.some((s) => sameId(s.id, p.id))) return false;
+    if (q && !String(p.name).includes(q)) return false;
+    return true;
+  });
+}
+
+function renderMobilePickList() {
+  const list = mobileCandidatesForExisting();
+  mel.pickRows.innerHTML = '';
+  if (!list.length) {
+    mel.pickEmpty.hidden = false;
+    return;
+  }
+  mel.pickEmpty.hidden = true;
+  for (const person of list) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'm-row';
+    btn.innerHTML = `<span class="m-lead"><span>${escapeHtml(person.name)}</span><span class="m-meta">谱号 ${escapeHtml(String(person.id))}</span></span>`;
+    btn.addEventListener('click', () => mobileSetExisting(person));
+    mel.pickRows.appendChild(btn);
+  }
+}
+
+async function mobileSubmitName(event) {
+  event.preventDefault();
+  if (state.saving) return;
+  mel.nameError.hidden = true;
+  mel.nameError.textContent = '';
+  const existingId = state.mobile.existingId;
+  if (!existingId) {
+    const name = String(mel.nameInput.value || '').trim();
+    if (!name) {
+      mel.nameError.hidden = false;
+      mel.nameError.textContent = '请填写姓名。';
+      return;
+    }
+    const birth = String(mel.nameBirth.value || '').trim();
+    const death = String(mel.nameDeath.value || '').trim();
+    if (birth && !/^\d+$/.test(birth)) {
+      mel.nameError.hidden = false;
+      mel.nameError.textContent = '年份请填写整数。';
+      return;
+    }
+    if (death && !/^\d+$/.test(death)) {
+      mel.nameError.hidden = false;
+      mel.nameError.textContent = '年份请填写整数。';
+      return;
+    }
+    if (birth && death && Number(death) < Number(birth)) {
+      mel.nameError.hidden = false;
+      mel.nameError.textContent = '去世年份不能早于出生年份。';
+      return;
+    }
+    el.addName.value = name;
+    el.addBirthYear.value = birth;
+    el.addDeathYear.value = death;
+    if (el.addExisting) el.addExisting.value = '';
+  } else {
+    if (el.addExisting) {
+      // Ensure option exists for recognize-existing path (no new POST person).
+      const opt = Array.from(el.addExisting.options).find((o) => o.value === String(existingId));
+      if (!opt) {
+        const person = findPerson(existingId);
+        const o = document.createElement('option');
+        o.value = String(existingId);
+        o.textContent = person ? personLabel(person) : existingId;
+        el.addExisting.appendChild(o);
+      }
+      el.addExisting.value = String(existingId);
+      el.addName.required = false;
+    }
+  }
+  state.mobile.returnToAnchor = true;
+  const fakeEvent = { preventDefault() {} };
+  try {
+    await submitAdd(fakeEvent);
+    if (!el.addError || el.addError.classList.contains('hidden') || !el.addError.textContent) {
+      mel.dlgName?.close?.();
+    } else {
+      mel.nameError.hidden = false;
+      mel.nameError.textContent = el.addError.textContent;
+    }
+  } catch (err) {
+    mel.nameError.hidden = false;
+    mel.nameError.textContent = err.message || '没有保存成功';
+  }
+}
+
+function wireMobileUi() {
+  updateMobileShellVisibility();
+  document.getElementById('m-btn-overview')?.addEventListener('click', () => {
+    state.mobile.listScroll = mel.list?.scrollTop || 0;
+    showMobileView('overview');
+    renderMobileOverview();
+  });
+  document.getElementById('m-btn-back-overview')?.addEventListener('click', () => {
+    showMobileView(state.persons.length ? 'list' : 'empty');
+    renderMobileList();
+  });
+  document.getElementById('m-btn-back-detail')?.addEventListener('click', () => {
+    setMobileFeedback('');
+    state.mobile.moreOpen = false;
+    if (mel.morePanel) mel.morePanel.hidden = true;
+    showMobileView('list');
+    renderMobileList();
+  });
+  document.getElementById('m-btn-add')?.addEventListener('click', () => mobileStartAdd());
+  document.getElementById('m-btn-first')?.addEventListener('click', () => {
+    showFirstPersonForm();
+    state.mobile.returnToAnchor = false;
+  });
+  mel.moreBtn?.addEventListener('click', () => {
+    state.mobile.moreOpen = !state.mobile.moreOpen;
+    if (mel.morePanel) mel.morePanel.hidden = !state.mobile.moreOpen;
+    mel.moreBtn.setAttribute('aria-expanded', state.mobile.moreOpen ? 'true' : 'false');
+  });
+  mel.search?.addEventListener('input', () => {
+    state.mobile.search = mel.search.value || '';
+    renderMobileList();
+  });
+  mel.searchClear?.addEventListener('click', () => {
+    state.mobile.search = '';
+    mel.search.value = '';
+    renderMobileList();
+  });
+  document.getElementById('m-rel-cancel')?.addEventListener('click', () => {
+    mel.dlgRel?.close?.();
+    state.mobile.returnToAnchor = false;
+  });
+  document.getElementById('m-name-cancel')?.addEventListener('click', () => {
+    mel.dlgName?.close?.();
+    state.mobile.returnToAnchor = false;
+    cancelAdd();
+  });
+  document.getElementById('m-name-toggle-years')?.addEventListener('click', () => {
+    mel.nameYears.classList.toggle('open');
+  });
+  document.getElementById('m-name-pick')?.addEventListener('click', () => {
+    state.mobile.pickSearch = '';
+    if (mel.pickSearch) mel.pickSearch.value = '';
+    renderMobilePickList();
+    mel.dlgPick?.showModal?.();
+  });
+  document.getElementById('m-name-clear-existing')?.addEventListener('click', () => mobileClearExisting());
+  document.getElementById('m-pick-cancel')?.addEventListener('click', () => mel.dlgPick?.close?.());
+  mel.pickSearch?.addEventListener('input', () => {
+    state.mobile.pickSearch = mel.pickSearch.value || '';
+    renderMobilePickList();
+  });
+  document.getElementById('m-form-name')?.addEventListener('submit', (event) => {
+    mobileSubmitName(event).catch((err) => {
+      mel.nameError.hidden = false;
+      mel.nameError.textContent = err.message || '没有保存成功';
+    });
+  });
+  document.getElementById('btn-reduce-motion')?.addEventListener('click', (event) => {
+    const on = !document.documentElement.classList.contains('reduce-motion');
+    document.documentElement.classList.toggle('reduce-motion', on);
+    event.currentTarget.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  document.getElementById('btn-preview-reset')?.addEventListener('click', async () => {
+    if (!state.previewMode || !previewFixture) return;
+    const boot = previewFixture.reset();
+    state.rootId = String(boot.rootId);
+    state.selectedId = null;
+    state.mobile.search = '';
+    state.mobile.feedback = '';
+    closeMobileDialogs();
+    await loadTree();
+    showMobileView('list');
+    syncMobileUi();
+  });
+}
+
+async function bootPreviewOrSession() {
+  wireMobileUi();
+  if (state.previewMode) {
+    document.body.classList.add('is-preview');
+    updateMobileShellVisibility();
+    setAuthed(true);
+    try {
+      await loadTree();
+      showMobileView('list');
+      syncMobileUi();
+    } catch (err) {
+      console.error(err);
+    }
+    return;
+  }
+  if (state.token) {
+    setAuthed(true);
+    loadTree()
+      .then(() => {
+        resumeRecoveryUi();
+        syncMobileUi();
+      })
+      .catch(() => {
+        /* token may be stale */
+      });
+  } else {
+    syncMobileUi();
+  }
+}
+
 el.login.addEventListener('click', () => login().catch((e) => alert(e.message)));
 el.reload.addEventListener('click', async () => {
   el.reload.disabled = true;
@@ -2567,12 +3246,14 @@ document.addEventListener('keydown', (event) => {
 new ResizeObserver(() => render()).observe(el.canvas.parentElement);
 
 render();
+bootPreviewOrSession();
 
-if (state.token) {
-  setAuthed(true);
-  loadTree()
-    .then(() => resumeRecoveryUi())
-    .catch(() => {
-      /* token may be stale */
-    });
-}
+// Expose minimal hooks for isolated integration probes (no secrets).
+window.yimaiMobile = {
+  sync: syncMobileUi,
+  openPerson: mobileOpenPerson,
+  showView: showMobileView,
+  isPreview: () => state.previewMode,
+  selectedId: () => state.selectedId,
+  persons: () => state.persons.map((p) => ({ id: p.id, name: p.name })),
+};
