@@ -217,6 +217,50 @@ function userFacingOpError(message) {
   return text;
 }
 
+function persistRootId(id) {
+  state.rootId = id ? String(id) : '';
+  if (state.previewMode) return;
+  if (state.rootId) localStorage.setItem(ROOT_KEY, state.rootId);
+  else localStorage.removeItem(ROOT_KEY);
+}
+
+function persistTreeId(id) {
+  state.treeId = id ? String(id) : '';
+  if (state.previewMode) return;
+  if (state.treeId) localStorage.setItem(TREE_KEY, state.treeId);
+  else localStorage.removeItem(TREE_KEY);
+}
+
+function scrubMobilePresentationDom() {
+  const shell = document.getElementById('mobile-shell');
+  if (!shell) return;
+  const listRows = document.getElementById('m-list-rows');
+  const detailName = document.getElementById('m-detail-name');
+  const detailKin = document.getElementById('m-detail-kin');
+  const detailPuhao = document.getElementById('m-detail-puhao');
+  const detailFeedback = document.getElementById('m-detail-feedback');
+  const overviewBody = document.getElementById('m-overview-body');
+  const moreRows = document.getElementById('m-more-rows');
+  if (listRows) listRows.innerHTML = '';
+  if (detailName) detailName.textContent = '';
+  if (detailKin) detailKin.innerHTML = '';
+  if (detailPuhao) {
+    detailPuhao.textContent = '';
+    detailPuhao.hidden = true;
+  }
+  if (detailFeedback) {
+    detailFeedback.textContent = '';
+    detailFeedback.hidden = true;
+  }
+  if (overviewBody) overviewBody.innerHTML = '';
+  if (moreRows) moreRows.innerHTML = '';
+  state.mobile.feedback = '';
+  state.mobile.search = '';
+  state.mobile.existingId = '';
+  state.mobile.moreOpen = false;
+  state.mobile.view = 'list';
+}
+
 /**
  * Clear account-scoped presentation on identity transition without touching other
  * accounts' server data. Does not clear durable recovery here — login's
@@ -225,11 +269,9 @@ function userFacingOpError(message) {
 function clearAccountScopedPresentation() {
   state.selectedId = null;
   state.confirmTrigger = null;
-  state.rootId = '';
-  localStorage.removeItem(ROOT_KEY);
+  persistRootId('');
   // Drop prior tree scope pointer; login/ensureCurrentTreeId re-acquires for the new identity.
-  state.treeId = '';
-  localStorage.removeItem(TREE_KEY);
+  persistTreeId('');
   state.tree = { root_id: null, nodes: [], edges: [] };
   state.persons = [];
   state.mode = 'detail';
@@ -258,8 +300,13 @@ function clearAccountScopedPresentation() {
   el.sheetDetail?.classList.remove('hidden');
   el.sheet?.classList.add('hidden');
   d3.select(el.canvas).selectAll('.node-card').classed('selected', false).attr('aria-pressed', 'false');
+  scrubMobilePresentationDom();
   updateStats();
   render();
+  // Ensure mobile list/detail names from the prior account cannot linger mid-await.
+  if (typeof syncMobileUi === 'function') {
+    syncMobileUi();
+  }
 }
 
 function invalidateSheetOpForAuthChange(reason = 'identity_changed') {
@@ -517,15 +564,14 @@ async function ensureCurrentTreeId({ force = false } = {}) {
   const tree = await api('/trees/current');
   if (!loadSessionStillCurrent(snap)) return state.treeId || '';
   if (tree?.id != null) {
-    state.treeId = String(tree.id);
-    localStorage.setItem(TREE_KEY, state.treeId);
+    persistTreeId(tree.id);
   }
   return state.treeId;
 }
 
 function writeRecovery(rec) {
   if (!rec) {
-    localStorage.removeItem(RECOVERY_KEY);
+    if (!state.previewMode) localStorage.removeItem(RECOVERY_KEY);
     state.recovery = null;
     return;
   }
@@ -534,7 +580,10 @@ function writeRecovery(rec) {
     userId: String(state.userId || rec.userId || ''),
     treeId: String(state.treeId || rec.treeId || ''),
   };
-  localStorage.setItem(RECOVERY_KEY, JSON.stringify(payload));
+  // Preview must not stamp production recovery pointers into shared localStorage.
+  if (!state.previewMode) {
+    localStorage.setItem(RECOVERY_KEY, JSON.stringify(payload));
+  }
   state.recovery = payload;
 }
 
@@ -564,8 +613,7 @@ function showRecoveryGuidance() {
 function syncTreeIdFromPersons() {
   const fromPerson = state.persons.find((p) => p.tree_id != null);
   if (fromPerson?.tree_id != null) {
-    state.treeId = String(fromPerson.tree_id);
-    localStorage.setItem(TREE_KEY, state.treeId);
+    persistTreeId(fromPerson.tree_id);
   }
 }
 
@@ -597,14 +645,12 @@ function isCreateUnresolvedPhase(phase) {
 
 function syncRootWithPersons() {
   if (state.persons.length === 0) {
-    state.rootId = '';
-    localStorage.removeItem(ROOT_KEY);
+    persistRootId('');
     return;
   }
   const rootOk = state.rootId && state.persons.some((p) => sameId(p.id, state.rootId));
   if (!rootOk) {
-    state.rootId = String(state.persons[0].id);
-    localStorage.setItem(ROOT_KEY, state.rootId);
+    persistRootId(state.persons[0].id);
   }
 }
 
@@ -616,8 +662,7 @@ async function loadScopedRecovery() {
   }
   // Cross-account: drop immediately. Never adopt foreign recovery.
   if (!state.userId || !rec.userId || !sameId(rec.userId, state.userId)) {
-    localStorage.removeItem(RECOVERY_KEY);
-    state.recovery = null;
+    writeRecovery(null);
     return null;
   }
   // Same account but empty treeId (empty-list login gap): stamp current tree
@@ -629,15 +674,14 @@ async function loadScopedRecovery() {
     } catch (_) { /* keep trying scope check below */ }
     if (state.treeId) {
       rec = { ...rec, treeId: String(state.treeId) };
-      localStorage.setItem(RECOVERY_KEY, JSON.stringify(rec));
+      writeRecovery(rec);
     }
   }
   if (recoveryScopedOk(rec)) {
     state.recovery = rec;
     return rec;
   }
-  localStorage.removeItem(RECOVERY_KEY);
-  state.recovery = null;
+  writeRecovery(null);
   return null;
 }
 
@@ -725,8 +769,7 @@ async function loadTree() {
     // Transient failures on a known root must surface to callers (e.g. post-save display).
     const rootKnown = state.persons.some((p) => sameId(p.id, state.rootId));
     if (rootKnown) throw err;
-    state.rootId = '';
-    localStorage.removeItem(ROOT_KEY);
+    persistRootId('');
     syncRootWithPersons();
     if (!state.rootId) {
       state.tree = { root_id: null, nodes: [], edges: [] };
@@ -738,8 +781,7 @@ async function loadTree() {
   // Sink: tree/root/render/openSheet only if still the initiating session.
   if (!loadSessionStillCurrent(snap)) return;
   state.tree = treePayload;
-  state.rootId = String(state.tree.root_id);
-  localStorage.setItem(ROOT_KEY, state.rootId);
+  persistRootId(state.tree.root_id);
   if (state.selectedId && !findPerson(state.selectedId)) {
     state.selectedId = null;
   }
@@ -1775,8 +1817,7 @@ async function afterSuccessfulDelete(op) {
 
   if (state.persons.length === 0) {
     state.selectedId = null;
-    state.rootId = '';
-    localStorage.removeItem(ROOT_KEY);
+    persistRootId('');
     state.tree = { root_id: null, nodes: [], edges: [] };
     render();
     showFirstPersonForm();
@@ -2085,8 +2126,7 @@ function cancelAdd() {
 async function setAsRoot() {
   const id = el.setRoot.dataset.personId;
   if (!id) return;
-  state.rootId = id;
-  localStorage.setItem(ROOT_KEY, id);
+  persistRootId(id);
   await loadTree();
 }
 
@@ -2172,8 +2212,7 @@ function setSaving(on) {
 
 function ensureRootForPerson(personId) {
   if (!state.rootId || !state.persons.some((p) => sameId(p.id, state.rootId))) {
-    state.rootId = String(personId);
-    localStorage.setItem(ROOT_KEY, state.rootId);
+    persistRootId(personId);
   }
 }
 
@@ -2276,8 +2315,7 @@ async function submitAdd(event) {
         if (relation === 'mother') ensureParentSlot(anchor, 'mother_id', existing.id);
         await bindPerson(existing, relation, anchor);
       } else {
-        state.rootId = String(existing.id);
-        localStorage.setItem(ROOT_KEY, state.rootId);
+        persistRootId(existing.id);
       }
       try {
         await finishAddSuccess(existing);
@@ -2450,8 +2488,7 @@ async function submitAdd(event) {
     // Saved person exists; display-load-only recovery skips bind (pending or failed).
     if (phase === 'display_load_failed' || phase === 'display_load_pending') {
       if (isFirst) {
-        state.rootId = String(target.id);
-        localStorage.setItem(ROOT_KEY, state.rootId);
+        persistRootId(target.id);
       } else {
         ensureRootForPerson(target.id);
       }
@@ -2522,8 +2559,7 @@ async function submitAdd(event) {
     }));
     state.addIntent.pendingPersonId = target.id;
     if (isFirst) {
-      state.rootId = String(target.id);
-      localStorage.setItem(ROOT_KEY, state.rootId);
+      persistRootId(target.id);
     } else {
       ensureRootForPerson(target.id);
     }
@@ -2737,12 +2773,16 @@ function syncMobileDetail() {
   setMobileFeedback(state.mobile.feedback);
   const rel = relationsFromEdges(person.id);
   const siblings = siblingsOf(person.id);
+  const inferredSiblingNote = siblings.some((s) => s.source === 'inferred' || s.source === 'both')
+    ? '<p class="m-muted m-pad">因共同父母仍显示为兄弟姐妹。</p>'
+    : '';
   mel.detailKin.innerHTML = [
     kinGroupHtml('父亲', rel.parentSlots.father ? [rel.parentSlots.father] : []),
     kinGroupHtml('母亲', rel.parentSlots.mother ? [rel.parentSlots.mother] : []),
     kinGroupHtml('配偶', rel.spouses),
     kinGroupHtml('子女', rel.children),
     kinGroupHtml('兄弟姐妹', siblings),
+    inferredSiblingNote,
   ].join('') || '<p class="m-empty-hint">近亲还没有记下</p>';
   mel.detailKin.querySelectorAll('[data-open-id]').forEach((node) => {
     node.addEventListener('click', () => mobileOpenPerson(node.dataset.openId));
@@ -2830,6 +2870,7 @@ function renderMobileOverview() {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'm-row';
+      btn.dataset.openId = String(person.id);
       btn.innerHTML = `<span class="m-lead"><span>${escapeHtml(mobileDisplayName(person, { forcePuhao: sameNameNeedsPuhao(person.name) }))}</span><span class="m-meta">${escapeHtml(bits.join(' · ') || '关系未记')}</span></span><span class="m-chev" aria-hidden="true">›</span>`;
       btn.addEventListener('click', () => mobileOpenPerson(person.id));
       group.appendChild(btn);
@@ -3257,5 +3298,23 @@ window.yimaiMobile = {
   showView: showMobileView,
   isPreview: () => state.previewMode,
   selectedId: () => state.selectedId,
+  rootId: () => state.rootId,
+  treeId: () => state.treeId,
+  userId: () => state.userId,
+  recovery: () => (state.recovery ? { ...state.recovery } : null),
   persons: () => state.persons.map((p) => ({ id: p.id, name: p.name })),
+  /** Product loadTree for identity-gate probes — same path as login/resume. */
+  loadTree: () => loadTree(),
+  stateSnap: () => ({
+    selectedId: state.selectedId,
+    rootId: state.rootId,
+    treeId: state.treeId,
+    userId: state.userId,
+    personNames: state.persons.map((p) => p.name),
+    personIds: state.persons.map((p) => String(p.id)),
+    recovery: state.recovery ? { ...state.recovery } : null,
+    mobileView: state.mobile.view,
+    detailName: document.getElementById('m-detail-name')?.textContent || '',
+    listText: document.getElementById('m-list-rows')?.innerText || '',
+  }),
 };

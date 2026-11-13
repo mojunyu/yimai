@@ -39,6 +39,7 @@ html.reduce-motion *::after {
   font-size: 13px;
   line-height: 18px;
   color: #3a3a3c;
+  font-family: var(--m-font);
 }
 .preview-banner-actions {
   display: flex;
@@ -53,7 +54,7 @@ html.reduce-motion *::after {
   border: 0;
   background: transparent;
   color: var(--m-blue);
-  font: inherit;
+  font-family: var(--m-font);
   font-size: 15px;
   line-height: 20px;
   font-weight: 500;
@@ -89,13 +90,56 @@ body.is-preview #auth-topbar { display: none; }
   flex: 0 1 auto;
   min-height: 0;
   padding-bottom: max(16px, env(safe-area-inset-bottom, 16px));
+  box-sizing: border-box;
+  width: 100%;
+}
+.mobile-shell,
+.mobile-shell button,
+.mobile-shell input,
+.mobile-shell select,
+.mobile-shell textarea,
+.mobile-shell .m-large,
+.mobile-shell .m-row,
+.mobile-shell .m-cta,
+.mobile-shell .m-link,
+.mobile-shell .m-back,
+.mobile-shell .m-ghost,
+.mobile-shell .m-feedback,
+.mobile-shell .m-sec-label,
+.mobile-shell .m-muted,
+.mobile-shell .m-empty-hint,
+.mobile-shell .m-form-error,
+.m-dialog,
+.m-dialog button,
+.m-dialog input {
+  font-family: var(--m-font);
 }
 .mobile-shell[hidden] { display: none !important; }
-/* Confirm owns the narrow viewport (VIS-02/03); do not compete with sheet chrome. */
+
+/* Confirm owns the narrow viewport (VIS); hide mobile + auth chrome so 409 is clean. */
 body:has(.sheet.confirm-open) #mobile-shell {
   display: none !important;
 }
+@media (max-width: 899px) {
+  body:has(.sheet.confirm-open) #auth-topbar {
+    max-height: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    border: 0 !important;
+  }
+}
+
 .m-view[hidden] { display: none !important; }
+.m-view {
+  width: 100%;
+  max-width: 430px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
 
 .m-status-row,
 .m-nav {
@@ -115,7 +159,9 @@ body:has(.sheet.confirm-open) #mobile-shell {
   border: 0;
   background: none;
   color: var(--m-blue);
-  font: inherit;
+  font-family: var(--m-font);
+  font-size: 17px;
+  line-height: 22px;
   padding: 8px 0;
   cursor: pointer;
 }
@@ -123,6 +169,7 @@ body:has(.sheet.confirm-open) #mobile-shell {
 .m-large {
   margin: 8px 0 0;
   padding: 0 16px;
+  font-family: var(--m-font);
   font-size: 31px;
   line-height: 38px;
   font-weight: 500;
@@ -139,6 +186,7 @@ body:has(.sheet.confirm-open) #mobile-shell {
   line-height: 18px;
   color: var(--m-muted);
   font-weight: 400;
+  font-family: var(--m-font);
 }
 .m-sec-label { margin: 16px 32px 4px; color: #7c7c80; }
 .m-pad { margin-left: 16px; margin-right: 16px; }
@@ -147,6 +195,7 @@ body:has(.sheet.confirm-open) #mobile-shell {
   font-size: 17px;
   line-height: 22px;
   color: #1c1c1e;
+  font-family: var(--m-font);
 }
 .m-feedback[hidden],
 .m-form-error[hidden],
@@ -159,6 +208,7 @@ body:has(.sheet.confirm-open) #mobile-shell {
   line-height: 22px;
   color: var(--m-muted);
   text-align: center;
+  font-family: var(--m-font);
 }
 .m-form-error { color: var(--m-danger); text-align: left; margin: 8px 16px 0; }
 
@@ -177,7 +227,7 @@ body:has(.sheet.confirm-open) #mobile-shell {
   min-width: 0;
   border: 0;
   background: transparent;
-  font: inherit;
+  font-family: var(--m-font);
   font-size: 16px;
   line-height: 21px;
   padding: 6px 0;
@@ -200,6 +250,8 @@ body:has(.sheet.confirm-open) #mobile-shell {
   background: var(--m-card);
   border-radius: 10px;
   overflow: hidden;
+  width: calc(100% - 32px);
+  box-sizing: border-box;
 }
 .m-row {
   display: flex;
@@ -213,10 +265,11 @@ body:has(.sheet.confirm-open) #mobile-shell {
   background: var(--m-card);
   color: var(--m-ink);
   text-align: left;
-  font: inherit;
+  font-family: var(--m-font);
   font-size: 17px;
   line-height: 22px;
   cursor: pointer;
+  box-sizing: border-box;
 }
 .m-group .m-row:first-child { border-top: 0; }
 .m-row .m-lead {
@@ -242,17 +295,19 @@ body:has(.sheet.confirm-open) #mobile-shell {
 .m-cta {
   display: block;
   width: calc(100% - 32px);
+  max-width: none;
   margin: 16px 16px 0;
   min-height: 44px;
   border: 0;
   border-radius: 12px;
   background: var(--m-blue);
   color: #fff;
-  font: inherit;
+  font-family: var(--m-font);
   font-size: 17px;
   line-height: 22px;
   font-weight: 500;
   cursor: pointer;
+  box-sizing: border-box;
 }
 .m-ghost {
   display: block;
@@ -293,6 +348,7 @@ body:has(.sheet.confirm-open) #mobile-shell {
 }
 .m-dlg-head h2 {
   margin: 0;
+  font-family: var(--m-font);
   font-size: 17px;
   line-height: 22px;
   font-weight: 500;
@@ -305,7 +361,7 @@ body:has(.sheet.confirm-open) #mobile-shell {
   border: 0;
   background: none;
   color: var(--m-blue);
-  font: inherit;
+  font-family: var(--m-font);
   font-size: 17px;
   padding: 8px 0;
   cursor: pointer;
@@ -338,9 +394,10 @@ body:has(.sheet.confirm-open) #mobile-shell {
   border-radius: 10px;
   background: #fff;
   padding: 10px 16px;
-  font: inherit;
+  font-family: var(--m-font);
   font-size: 17px;
   line-height: 22px;
+  box-sizing: border-box;
 }
 .m-years {
   display: none;
@@ -354,43 +411,99 @@ body:has(.sheet.confirm-open) #mobile-shell {
 .m-overview-block { margin-bottom: 8px; }
 .m-overview-block .m-sec-label { margin-top: 12px; }
 
-/* Narrow: mobile shell first; desktop workspace keeps flex room for canvas/sheet. */
+/*
+ * Narrow product: mobile A shell is a fixed full-viewport plane (out of flow).
+ * Desktop workspace keeps its original flex geometry underneath for confirm/VIS
+ * and wide-desktop compatibility — users see only the mobile plane until they
+ * open 全谱 (still inside the shell) or until confirm-open hides the shell.
+ */
 @media (max-width: 899px) {
-  body:not(.is-preview) .mobile-shell:not([hidden]) {
-    border-bottom: 1px solid var(--m-line);
+  body:not(.is-preview) #mobile-shell:not([hidden]) {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
     width: 100%;
     max-width: none;
-    max-height: min(34vh, 300px);
-    overflow: auto;
-  }
-  body:not(.is-preview) #desktop-workspace {
-    flex: 1 1 auto;
-    min-height: 0;
-  }
-  body.is-preview #desktop-workspace {
-    /* Keep in DOM for shared ids/hooks; visually secondary in preview. */
-    opacity: 0.001;
-    height: 0;
-    overflow: hidden;
-    pointer-events: none;
-  }
-  body.is-preview .mobile-shell:not([hidden]) {
-    max-width: 430px;
     max-height: none;
     min-height: 100dvh;
-    overflow: visible;
+    margin: 0;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    background: var(--m-bg);
+    padding-bottom: max(24px, env(safe-area-inset-bottom, 24px));
+  }
+  body:not(.is-preview) #mobile-shell:not([hidden]) .m-view {
+    max-width: 430px;
+    width: 100%;
+  }
+  body.is-preview #desktop-workspace {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    pointer-events: none;
+  }
+  body.is-preview #mobile-shell:not([hidden]) {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    width: 100%;
+    max-width: none;
+    max-height: none;
+    min-height: 100dvh;
+    margin: 0;
+    overflow: auto;
+  }
+  body.is-preview #mobile-shell:not([hidden]) .m-view {
+    max-width: 430px;
+    width: 100%;
   }
 }
 
+/* Wide: list column beside desktop workspace (desktop remains primary canvas). */
 @media (min-width: 900px) {
-  .mobile-shell:not([hidden]) {
-    max-width: none;
+  body.is-authed:not(.is-preview):has(#mobile-shell:not([hidden])) {
     display: grid;
-    grid-template-columns: minmax(280px, 380px) 1fr;
-    gap: 0;
-    border-bottom: 1px solid var(--m-line);
+    grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    height: 100%;
   }
-  .mobile-shell .m-view {
+  body.is-authed:not(.is-preview):has(#mobile-shell:not([hidden])) #auth-topbar {
+    grid-column: 1 / -1;
+  }
+  body.is-authed:not(.is-preview) #mobile-shell:not([hidden]) {
+    position: relative;
+    grid-column: 1;
+    grid-row: 2;
+    z-index: 5;
+    max-width: none;
+    width: auto;
+    margin: 0;
+    max-height: none;
+    height: 100%;
+    overflow: auto;
+    border-right: 1px solid var(--m-line);
+  }
+  body.is-authed:not(.is-preview):has(#mobile-shell:not([hidden])) #desktop-workspace {
+    grid-column: 2;
+    grid-row: 2;
+    min-width: 0;
+    min-height: 0;
+  }
+  body.is-authed:not(.is-preview):has(#mobile-shell:not([hidden])) .preview-entry-hint {
+    grid-column: 1 / -1;
+  }
+  body.is-preview #mobile-shell:not([hidden]) {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    max-width: none;
+    width: 100%;
+    margin: 0;
+    overflow: auto;
+  }
+  body.is-preview #mobile-shell .m-view {
     max-width: 430px;
   }
 }

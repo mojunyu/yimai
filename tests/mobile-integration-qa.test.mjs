@@ -20,11 +20,19 @@ const BASE_URL = process.env.BASE_URL || 'http://127.0.0.1:8000';
 const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR
   ? path.resolve(process.env.ARTIFACTS_DIR)
   : path.resolve(APP_ROOT, 'artifacts/integration-qa');
+
+function gitHeadShort() {
+  return spawnSync('git', ['rev-parse', '--short=12', 'HEAD'], { cwd: APP_ROOT, encoding: 'utf8' }).stdout.trim();
+}
+
 const STORE_DIR = process.env.EVIDENCE_STORE
   ? path.resolve(process.env.EVIDENCE_STORE)
-  : '/cursor/stores/self/yimai-mobile-integration-20261113';
+  : path.join('/cursor/stores/self', `yimai-mobile-integration-${gitHeadShort()}`);
 
 fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
+fs.mkdirSync(path.join(ARTIFACTS_DIR, 'screenshots'), { recursive: true });
+fs.mkdirSync(path.join(ARTIFACTS_DIR, 'api-json'), { recursive: true });
+fs.mkdirSync(path.join(ARTIFACTS_DIR, 'network'), { recursive: true });
 fs.mkdirSync(STORE_DIR, { recursive: true });
 
 const startedAt = new Date();
@@ -54,11 +62,11 @@ function sourceHashes() {
 const START_HASHES = sourceHashes();
 
 function log(id, passed, message = '', extra = {}) {
-  const status = passed ? 'PASS' : 'FAIL';
+  const status = passed ? 'PASS' : 'observed FAIL';
   console.log(`${status}: ${id}${message ? ' - ' + message : ''}`);
   results.push({
     id,
-    status: passed ? 'PASS' : 'observed FAIL',
+    status,
     message,
     at: new Date().toISOString(),
     ...extra,
@@ -112,8 +120,30 @@ ${scriptBody}
   return JSON.parse(line);
 }
 
+function sanitizeNet(entry) {
+  // Never archive Authorization / passwords / tokens.
+  const headers = { ...(entry.headers || {}) };
+  for (const key of Object.keys(headers)) {
+    if (/authorization|cookie|token|password|x-xsrf/i.test(key)) {
+      headers[key] = '[REDACTED]';
+    }
+  }
+  return {
+    method: entry.method,
+    url: String(entry.url || '').replace(/([?&](?:token|password|access_token)=)[^&]*/gi, '$1[REDACTED]'),
+    resourceType: entry.resourceType || null,
+    headers,
+  };
+}
+
 async function screenshot(name) {
-  const file = path.join(ARTIFACTS_DIR, name);
+  const file = path.join(ARTIFACTS_DIR, 'screenshots', name);
+  await page.screenshot({ path: file, fullPage: false });
+  return file;
+}
+
+async function screenshotFull(name) {
+  const file = path.join(ARTIFACTS_DIR, 'screenshots', name);
   await page.screenshot({ path: file, fullPage: true });
   return file;
 }
@@ -134,6 +164,23 @@ async function openAuthed(auth, rootId) {
   }, auth, rootId || auth.rootId || auth.idLan || auth.idA || auth.idT || '');
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForFunction(() => window.yimaiMobile && document.getElementById('mobile-shell') && !document.getElementById('mobile-shell').hidden, { timeout: 10000 });
+}
+
+async function productLogin(email, password) {
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.click('#email', { clickCount: 3 });
+  await page.type('#email', email);
+  await page.click('#password', { clickCount: 3 });
+  await page.type('#password', password);
+  await page.click('#btn-login');
+  await page.waitForFunction(() => document.body.classList.contains('is-authed'), { timeout: 15000 });
+  // Scrub password field so later screenshots never show credentials.
+  await page.evaluate(() => {
+    const pw = document.getElementById('password');
+    if (pw) pw.value = '';
+  });
 }
 
 async function apiJson(token, method, pathName, body) {
@@ -167,12 +214,13 @@ $zhou=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'林舟','gender'=>
 $lan=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'林岚','gender'=>'female','generation'=>2,'father_id'=>$gu->id,'mother_id'=>$yu->id]);
 $he=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'林禾','gender'=>'male','generation'=>2,'father_id'=>$gu->id,'mother_id'=>$yu->id]);
 $shi=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'周石','gender'=>'male','generation'=>2]);
-App\\Models\\SpouseLink::create(['tree_id'=>$t->id,'person_a_id'=>$lan->id,'person_b_id'=>$shi->id]);
-App\\Models\\SiblingLink::create(['tree_id'=>$t->id,'person_a_id'=>min($lan->id,$zhou->id),'person_b_id'=>max($lan->id,$zhou->id)]);
+$spouse=App\\Models\\SpouseLink::create(['tree_id'=>$t->id,'person_a_id'=>$lan->id,'person_b_id'=>$shi->id]);
+$sib=App\\Models\\SiblingLink::create(['tree_id'=>$t->id,'person_a_id'=>min($lan->id,$zhou->id),'person_b_id'=>max($lan->id,$zhou->id)]);
 echo json_encode([
   'userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t')->plainTextToken,
   'idGu'=>$gu->id,'idYu'=>$yu->id,'idZhou'=>$zhou->id,'idLan'=>$lan->id,'idHe'=>$he->id,'idShi'=>$shi->id,
-  'rootId'=>$lan->id,'account_email'=>$email
+  'spouseLinkId'=>$spouse->id,'siblingLinkId'=>$sib->id,
+  'rootId'=>$lan->id,'account_email'=>$email,'password'=>'password'
 ], JSON_UNESCAPED_UNICODE);
 `);
 }
@@ -205,6 +253,53 @@ async function mobileAddRelative(relationLabel, newName) {
   await page.waitForFunction(() => !document.getElementById('m-dlg-name')?.open, { timeout: 10000 });
 }
 
+async function probeAddVisibility() {
+  return page.evaluate(() => {
+    const add = document.getElementById('m-btn-add');
+    const shell = document.getElementById('mobile-shell');
+    if (!add || !shell || shell.hidden) {
+      return { ok: false, reason: 'missing' };
+    }
+    const r = add.getBoundingClientRect();
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+    const inViewport = r.width > 0 && r.height > 0
+      && r.top >= 0 && r.left >= 0
+      && r.bottom <= vh + 0.5 && r.right <= vw + 0.5;
+    const cx = Math.min(vw - 1, Math.max(0, r.left + r.width / 2));
+    const cy = Math.min(vh - 1, Math.max(0, r.top + r.height / 2));
+    const topEl = document.elementFromPoint(cx, cy);
+    const clickable = Boolean(topEl && (topEl === add || add.contains(topEl)));
+    const nameEl = document.getElementById('m-detail-name');
+    const cs = nameEl ? getComputedStyle(nameEl) : null;
+    const shellCs = getComputedStyle(shell);
+    const rootCs = getComputedStyle(document.documentElement);
+    const desktopCover = (() => {
+      const sheet = document.getElementById('sheet');
+      if (!sheet || sheet.classList.contains('hidden')) return false;
+      const sr = sheet.getBoundingClientRect();
+      // Desktop sheet/canvas must not dominate the narrow viewport over the mobile shell.
+      return sr.width > vw * 0.5 && sr.height > vh * 0.4 && sr.top < vh * 0.3
+        && shellCs.position !== 'fixed';
+    })();
+    return {
+      ok: inViewport && clickable && !desktopCover,
+      inViewport,
+      clickable,
+      desktopCover,
+      rect: { top: r.top, left: r.left, width: r.width, height: r.height, bottom: r.bottom },
+      viewport: { w: vw, h: vh },
+      name: nameEl?.textContent || '',
+      nameFontSize: cs?.fontSize || null,
+      nameFontFamily: cs?.fontFamily || null,
+      mFontVar: rootCs.getPropertyValue('--m-font').trim(),
+      shellWidth: shell.getBoundingClientRect().width,
+      shellPosition: shellCs.position,
+      layoutWidth: document.documentElement.clientWidth,
+    };
+  });
+}
+
 async function setup() {
   browser = await puppeteer.launch({
     headless: true,
@@ -232,7 +327,7 @@ async function testInt01MainPath() {
   }));
   const after = await apiJson(auth.token, 'GET', '/persons');
   const tree = await apiJson(auth.token, 'GET', `/persons/${auth.idLan}/tree`);
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-01-api.json'), JSON.stringify({
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-01-api.json'), JSON.stringify({
     account_id: auth.userId,
     tree_id: auth.treeId,
     target_id: auth.idLan,
@@ -259,37 +354,55 @@ async function testInt01MainPath() {
 async function testInt02ListOverview() {
   const auth = seedLanFamily();
   await openAuthed(auth, auth.idLan);
-  await mobileAddRelativeViaList(auth, '儿子', '全谱儿');
-  const listIds = await page.evaluate(() => {
+  await mobileOpenByName('林岚');
+  await mobileAddRelative('儿子', '全谱儿');
+  await page.evaluate(() => {
     window.yimaiMobile.showView('list');
     window.yimaiMobile.sync();
-    return Array.from(document.querySelectorAll('#m-list-rows .m-row')).map((b) => b.dataset.openId || b.textContent);
   });
-  // reopen and check overview
-  await page.evaluate(() => {
-    document.getElementById('m-btn-back-detail')?.click();
-    document.getElementById('m-btn-overview')?.click();
-  });
+  await page.waitForSelector('#m-view-list:not([hidden])');
+  const listSnap = await page.evaluate(() => ({
+    ids: Array.from(document.querySelectorAll('#m-list-rows .m-row'))
+      .map((b) => b.dataset.openId)
+      .filter(Boolean),
+    text: document.getElementById('m-list-rows')?.innerText || '',
+  }));
+  await screenshot('INT-02-list.png');
+  await page.evaluate(() => document.getElementById('m-btn-overview')?.click());
   await page.waitForSelector('#m-view-overview:not([hidden])');
-  const overviewText = await page.$eval('#m-overview-body', (el) => el.innerText);
+  const overviewSnap = await page.evaluate(() => ({
+    text: document.getElementById('m-overview-body')?.innerText || '',
+    ids: Array.from(document.querySelectorAll('#m-overview-body [data-open-id]'))
+      .map((b) => b.dataset.openId),
+  }));
+  await screenshot('INT-02-overview.png');
   const persons = await apiJson(auth.token, 'GET', '/persons');
   const tree = await apiJson(auth.token, 'GET', `/persons/${auth.idLan}/tree`);
-  await screenshot('INT-02-overview.png');
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-02-api.json'), JSON.stringify({ persons: persons.json, tree: tree.json }, null, 2));
-  const names = (persons.json.data || []).map((p) => p.name);
-  const ok = names.includes('全谱儿')
-    && overviewText.includes('全谱儿')
-    && overviewText.includes('林岚')
-    && listIds.length >= names.length - 0;
-  log('INT-02', ok, JSON.stringify({ listCount: listIds.length, overviewHas: overviewText.includes('全谱儿') }), {
-    account_id: auth.userId,
-    tree_id: auth.treeId,
-  });
-}
-
-async function mobileAddRelativeViaList(auth, rel, name) {
-  await mobileOpenByName('林岚');
-  await mobileAddRelative(rel, name);
+  const apiIds = (persons.json.data || []).map((p) => String(p.id)).sort();
+  const treeIds = (tree.json.nodes || []).map((n) => String(n.id)).sort();
+  const listIds = [...listSnap.ids].map(String).sort();
+  const overviewIds = [...new Set(overviewSnap.ids.map(String))].sort();
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-02-api.json'), JSON.stringify({
+    persons: persons.json,
+    tree: tree.json,
+    listIds,
+    overviewIds,
+    apiIds,
+    treeIds,
+  }, null, 2));
+  const sameIds = JSON.stringify(apiIds) === JSON.stringify(treeIds)
+    && apiIds.every((id) => listIds.includes(id))
+    && apiIds.every((id) => overviewIds.includes(id));
+  const ok = sameIds
+    && listSnap.text.includes('全谱儿')
+    && overviewSnap.text.includes('全谱儿')
+    && overviewSnap.text.includes('林岚');
+  log('INT-02', ok, JSON.stringify({
+    listCount: listIds.length,
+    overviewCount: overviewIds.length,
+    apiCount: apiIds.length,
+    sameIds,
+  }), { account_id: auth.userId, tree_id: auth.treeId });
 }
 
 async function testInt03Children409() {
@@ -309,18 +422,23 @@ async function testInt03Children409() {
     title: document.getElementById('sheet-confirm-title')?.textContent,
     body: document.getElementById('sheet-confirm-body')?.textContent,
     actions: Array.from(document.querySelectorAll('#sheet-confirm-actions button')).map((b) => b.textContent.trim()),
+    authEmail: document.getElementById('email')?.value || '',
+    authPasswordFilled: Boolean(document.getElementById('password')?.value),
+    shellHidden: document.getElementById('mobile-shell')?.hidden
+      || getComputedStyle(document.getElementById('mobile-shell')).display === 'none',
   }));
   const del = await apiJson(auth.token, 'DELETE', `/persons/${auth.idGu}`);
   const still = await apiJson(auth.token, 'GET', `/persons/${auth.idGu}`);
   await screenshot('INT-03-409.png');
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-03-api.json'), JSON.stringify({ delete: del, still: still.json }, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-03-api.json'), JSON.stringify({ delete: del, still: still.json }, null, 2));
   const ok = del.status === 409
     && Array.isArray(del.json?.children)
     && del.json.children.length > 0
     && still.status === 200
     && (ui.body || '').includes('更正')
-    && ui.actions.some((a) => a.includes('打开并更正'));
-  log('INT-03', ok, JSON.stringify({ status: del.status, actions: ui.actions }), {
+    && ui.actions.some((a) => a.includes('打开并更正'))
+    && !ui.authPasswordFilled;
+  log('INT-03', ok, JSON.stringify({ status: del.status, actions: ui.actions, shellHidden: ui.shellHidden }), {
     account_id: auth.userId,
     tree_id: auth.treeId,
     target_id: auth.idGu,
@@ -330,48 +448,125 @@ async function testInt03Children409() {
 async function testInt04FailUnknown() {
   const auth = seedLanFamily();
   await openAuthed(auth, auth.idShi);
-  // alone spouse can delete; arm network failure hook if present, else simulate uncertain via evaluate
   await mobileOpenByName('周石');
   const targetId = auth.idShi;
+
+  // Branch A: definite 4xx (422) — visible reject feedback, confirm stays, original ID retained.
   await page.evaluate((id) => {
-    window.__yimaiFailNextDelete = true;
-    const originalFetch = window.fetch.bind(window);
+    window.__yimaiDeleteMode = '422';
+    const originalFetch = window.__yimaiOriginalFetch || window.fetch.bind(window);
+    window.__yimaiOriginalFetch = originalFetch;
     window.fetch = async (url, opts = {}) => {
       const u = String(url);
       const m = (opts.method || 'GET').toUpperCase();
-      if (window.__yimaiFailNextDelete && m === 'DELETE' && u.includes(`/persons/${id}`)) {
-        window.__yimaiFailNextDelete = false;
+      if (window.__yimaiDeleteMode === '422' && m === 'DELETE' && u.includes(`/persons/${id}`)) {
+        window.__yimaiDeleteMode = null;
+        return new Response(JSON.stringify({ message: 'forced client rejection 422' }), {
+          status: 422,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (window.__yimaiDeleteMode === 'network' && m === 'DELETE' && u.includes(`/persons/${id}`)) {
+        window.__yimaiDeleteMode = null;
         throw new TypeError('Failed to fetch (injected)');
+      }
+      if (window.__yimaiDeleteMode === 'lost' && m === 'DELETE' && u.includes(`/persons/${id}`)) {
+        window.__yimaiDeleteMode = null;
+        // Simulate submitted-but-unreadable response (uncertain parse path).
+        return new Response('<<<not-json>>>', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
       return originalFetch(url, opts);
     };
   }, targetId);
+
+  async function openDeleteConfirm() {
+    await page.evaluate(() => {
+      document.getElementById('m-btn-more')?.click();
+      const del = Array.from(document.querySelectorAll('#m-more-rows .m-row'))
+        .find((b) => (b.textContent || '').includes('删除此人'));
+      del?.click();
+    });
+    await page.waitForSelector('#sheet-confirm:not(.hidden)');
+    await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
+  }
+
+  await openDeleteConfirm();
+  await page.waitForFunction(() => {
+    const err = document.getElementById('sheet-confirm-error')?.textContent || '';
+    return err.length > 0;
+  }, { timeout: 8000 });
+  const ui422 = await page.evaluate((id) => ({
+    confirmHidden: document.getElementById('sheet-confirm')?.classList.contains('hidden'),
+    err: document.getElementById('sheet-confirm-error')?.textContent || '',
+    body: document.getElementById('sheet-confirm-body')?.textContent || '',
+    title: document.getElementById('sheet-confirm-title')?.textContent || '',
+    mentionsId: (document.getElementById('sheet-confirm-body')?.textContent || '').includes(String(id))
+      || (document.getElementById('sheet-confirm-title')?.textContent || '').includes('周石'),
+  }), targetId);
+  await screenshot('INT-04-4xx.png');
   await page.evaluate(() => {
-    document.getElementById('m-btn-more')?.click();
-    const del = Array.from(document.querySelectorAll('#m-more-rows .m-row'))
-      .find((b) => (b.textContent || '').includes('删除此人'));
-    del?.click();
+    const btn = document.querySelector('#sheet-confirm-actions button[data-confirm-cancel="1"]')
+      || Array.from(document.querySelectorAll('#sheet-confirm-actions button'))
+        .find((b) => /取消|关闭/.test(b.textContent || ''));
+    btn?.click();
   });
-  await page.waitForSelector('#sheet-confirm:not(.hidden)');
-  // switch selection to another person while confirm open (DEL-7)
-  await page.evaluate((otherId) => {
-    window.yimaiMobile.openPerson(otherId);
-  }, auth.idLan);
-  await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
-  await sleep(800);
+  await sleep(300);
+
+  // Branch B: network failure → unknown result with 原谱号.
+  await page.evaluate(() => { window.__yimaiDeleteMode = 'network'; });
+  await mobileOpenByName('周石');
+  await openDeleteConfirm();
+  await page.waitForFunction(() => (document.getElementById('sheet-confirm-title')?.textContent || '').includes('不确定'), { timeout: 8000 });
+  const uiUnknown = await page.evaluate((id) => ({
+    confirmHidden: document.getElementById('sheet-confirm')?.classList.contains('hidden'),
+    title: document.getElementById('sheet-confirm-title')?.textContent || '',
+    body: document.getElementById('sheet-confirm-body')?.textContent || '',
+    err: document.getElementById('sheet-confirm-error')?.textContent || '',
+    hasYuan: (document.getElementById('sheet-confirm-body')?.textContent || '').includes(`原谱号 ${id}`)
+      || (document.getElementById('sheet-confirm-body')?.textContent || '').includes(String(id)),
+  }), targetId);
+  await screenshot('INT-04-unknown.png');
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('#sheet-confirm-actions button'))
+      .find((b) => (b.textContent || '').includes('关闭'));
+    btn?.click();
+  });
+  await sleep(300);
+
+  // Branch C: lost/unreadable submitted response → unknown with 原谱号.
+  await page.evaluate(() => { window.__yimaiDeleteMode = 'lost'; });
+  await mobileOpenByName('周石');
+  await openDeleteConfirm();
+  await page.waitForFunction(() => (document.getElementById('sheet-confirm-title')?.textContent || '').includes('不确定'), { timeout: 8000 });
+  const uiLost = await page.evaluate((id) => ({
+    confirmHidden: document.getElementById('sheet-confirm')?.classList.contains('hidden'),
+    title: document.getElementById('sheet-confirm-title')?.textContent || '',
+    body: document.getElementById('sheet-confirm-body')?.textContent || '',
+    hasYuan: (document.getElementById('sheet-confirm-body')?.textContent || '').includes(String(id)),
+  }), targetId);
+  await screenshot('INT-04-lost.png');
+
   const still = await apiJson(auth.token, 'GET', `/persons/${targetId}`);
   const lan = await apiJson(auth.token, 'GET', `/persons/${auth.idLan}`);
-  const ui = await page.evaluate(() => ({
-    confirmHidden: document.getElementById('sheet-confirm')?.classList.contains('hidden'),
-    err: document.getElementById('sheet-confirm-error')?.textContent
-      || document.getElementById('sheet-error')?.textContent
-      || '',
-    body: document.getElementById('sheet-confirm-body')?.textContent || '',
-  }));
-  await screenshot('INT-04-unknown.png');
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-04-api.json'), JSON.stringify({ still: still.json, lan: lan.json, ui }, null, 2));
-  const ok = still.status === 200 && lan.status === 200 && !(ui.err || '').includes('已删除');
-  log('INT-04', ok, JSON.stringify({ still: still.status, ui }), {
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-04-api.json'), JSON.stringify({
+    still: still.json, lan: lan.json, ui422, uiUnknown, uiLost, targetId,
+  }, null, 2));
+
+  const ok = still.status === 200
+    && lan.status === 200
+    && ui422.confirmHidden === false
+    && (ui422.err || '').length > 0
+    && ui422.mentionsId
+    && uiUnknown.confirmHidden === false
+    && (uiUnknown.title || '').includes('不确定')
+    && uiUnknown.hasYuan
+    && uiLost.confirmHidden === false
+    && (uiLost.title || '').includes('不确定')
+    && uiLost.hasYuan;
+  log('INT-04', ok, JSON.stringify({ still: still.status, ui422, uiUnknown, uiLost }), {
     account_id: auth.userId,
     tree_id: auth.treeId,
     target_id: targetId,
@@ -380,48 +575,99 @@ async function testInt04FailUnknown() {
 
 async function testInt05CorrectionVsDelete() {
   const auth = seedLanFamily();
-  // clear mother slot on 林岚
-  const patch = await apiJson(auth.token, 'PATCH', `/persons/${auth.idLan}`, { mother_id: null });
-  const afterPatch = await apiJson(auth.token, 'GET', `/persons/${auth.idLan}`);
-  // unlink explicit sibling
-  const sibs = await page.evaluate(async (tok, lan, zhou) => {
-    const res = await fetch(`${location.origin}/api/v1/sibling-links`, {
-      headers: { Accept: 'application/json', Authorization: `Bearer ${tok}` },
-    });
-    const data = await res.json();
-    const list = Array.isArray(data) ? data : (data.data || []);
-    const hit = list.find((l) => (
-      (Number(l.person_a_id) === Number(lan) && Number(l.person_b_id) === Number(zhou))
-      || (Number(l.person_a_id) === Number(zhou) && Number(l.person_b_id) === Number(lan))
-    ));
-    return hit;
-  }, auth.token, auth.idLan, auth.idZhou);
-  let unlink = { status: 0 };
-  if (sibs?.id) {
-    unlink = await apiJson(auth.token, 'DELETE', `/sibling-links/${sibs.id}`);
-  }
   await openAuthed(auth, auth.idLan);
   await mobileOpenByName('林岚');
+
+  // Parent mis-record correction via product UI (clear mother), not delete.
+  await page.evaluate(() => {
+    document.getElementById('m-btn-more')?.click();
+    const btn = Array.from(document.querySelectorAll('#m-more-rows .m-row'))
+      .find((b) => (b.textContent || '').includes('更正母亲'));
+    if (!btn) throw new Error('missing 更正母亲');
+    btn.click();
+  });
+  await page.waitForSelector('#sheet-confirm:not(.hidden)');
+  await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
+  await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
+  const afterMother = await apiJson(auth.token, 'GET', `/persons/${auth.idLan}`);
+
+  // Spouse unlink via real DELETE /spouse-links/{id} product path — must not delete 周石.
+  await mobileOpenByName('林岚');
+  await page.evaluate(() => {
+    document.getElementById('m-btn-more')?.click();
+    const btn = Array.from(document.querySelectorAll('#m-more-rows .m-row'))
+      .find((b) => (b.textContent || '').includes('解除夫妻'));
+    if (!btn) throw new Error('missing 解除夫妻');
+    btn.click();
+  });
+  await page.waitForSelector('#sheet-confirm:not(.hidden)');
+  const spouseNet = [];
+  page.removeAllListeners('request');
+  page.on('request', (req) => {
+    if (/\/spouse-links\//.test(req.url()) && req.method() === 'DELETE') {
+      spouseNet.push(sanitizeNet({ method: req.method(), url: req.url(), headers: req.headers() }));
+    }
+  });
+  await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
+  await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
+  const shiStill = await apiJson(auth.token, 'GET', `/persons/${auth.idShi}`);
+  const spouseList = await apiJson(auth.token, 'GET', '/spouse-links');
+  const spouseGone = !(spouseList.json?.data || []).some((l) => Number(l.id) === Number(auth.spouseLinkId));
+
+  // Explicit sibling unlink; inferred co-parent sibling prompt must remain.
+  await mobileOpenByName('林岚');
+  await page.evaluate(() => {
+    document.getElementById('m-btn-more')?.click();
+    const btn = Array.from(document.querySelectorAll('#m-more-rows .m-row'))
+      .find((b) => (b.textContent || '').includes('移除显式兄妹'));
+    if (!btn) throw new Error('missing 移除显式兄妹');
+    btn.click();
+  });
+  await page.waitForSelector('#sheet-confirm:not(.hidden)');
+  await page.evaluate(() => document.querySelector('#sheet-confirm-actions button[data-confirm-primary="1"]')?.click());
+  await page.waitForFunction(() => document.getElementById('sheet-confirm')?.classList.contains('hidden'), { timeout: 8000 });
+  await sleep(400);
+  await mobileOpenByName('林岚');
   const kin = await page.$eval('#m-detail-kin', (el) => el.innerText);
-  // delete spouse-only person 周石 should succeed
-  const delShi = await apiJson(auth.token, 'DELETE', `/persons/${auth.idShi}`);
-  const shiGone = await apiJson(auth.token, 'GET', `/persons/${auth.idShi}`);
-  const lanStill = await apiJson(auth.token, 'GET', `/persons/${auth.idLan}`);
+  const sheetErr = await page.evaluate(() => document.getElementById('sheet-error')?.textContent || '');
+  const sheetSummary = await page.evaluate(() => document.getElementById('sheet-summary')?.innerText || '');
+  const zhouStill = await apiJson(auth.token, 'GET', `/persons/${auth.idZhou}`);
+  const heStill = await apiJson(auth.token, 'GET', `/persons/${auth.idHe}`);
   await screenshot('INT-05-detail.png');
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-05-api.json'), JSON.stringify({
-    patch, afterPatch: afterPatch.json, unlink, delShi, shiGone, lanStill: lanStill.json, kin,
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-05-api.json'), JSON.stringify({
+    afterMother: afterMother.json,
+    shiStill: { status: shiStill.status, id: shiStill.json?.id },
+    spouseGone,
+    spouseNet,
+    spouseLinkId: auth.spouseLinkId,
+    siblingLinkId: auth.siblingLinkId,
+    zhouStill: zhouStill.status,
+    heStill: heStill.status,
+    kin,
+    sheetErr,
+    sheetSummary,
   }, null, 2));
-  const ok = patch.status === 200
-    && afterPatch.json.mother_id == null
-    && afterPatch.json.father_id != null
-    && lanStill.status === 200
-    && delShi.status === 204
-    && shiGone.status === 404
-    && kin.includes('林禾'); // inferred sibling remains after explicit unlink may still show via parents
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-05-spouse-unlink.json'), JSON.stringify(spouseNet, null, 2));
+
+  const inferredPrompt = (kin || '').includes('因共同父母')
+    || (sheetErr || '').includes('因共同父母')
+    || (sheetSummary || '').includes('因共同父母');
+  const ok = afterMother.status === 200
+    && afterMother.json.mother_id == null
+    && afterMother.json.father_id != null
+    && Number(afterMother.json.father_id) === Number(auth.idGu)
+    && shiStill.status === 200
+    && spouseGone
+    && spouseNet.some((n) => n.url.includes(`/spouse-links/${auth.spouseLinkId}`))
+    && zhouStill.status === 200
+    && heStill.status === 200
+    && kin.includes('林禾')
+    && inferredPrompt;
   log('INT-05', ok, JSON.stringify({
-    mother: afterPatch.json.mother_id,
-    delShi: delShi.status,
-    inferredNote: kin.includes('林禾'),
+    mother: afterMother.json.mother_id,
+    spouseGone,
+    spouseLinkHit: spouseNet.map((n) => n.url),
+    inferredPrompt,
   }), { account_id: auth.userId, tree_id: auth.treeId, target_id: auth.idLan });
 }
 
@@ -430,27 +676,75 @@ async function testInt06PreviewIsolation() {
   page.removeAllListeners('request');
   page.on('request', (req) => {
     if (req.url().includes('/api/v1/')) {
-      apiHits.push({ method: req.method(), url: req.url() });
+      apiHits.push(sanitizeNet({ method: req.method(), url: req.url(), headers: req.headers(), resourceType: req.resourceType() }));
     }
   });
+
+  // Seed a fake production pointer first, then enter preview — preview must not overwrite it.
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('yimai_root_id', 'prod-root-sentinel');
+    localStorage.setItem('yimai_tree_id', 'prod-tree-sentinel');
+    localStorage.setItem('yimai_add_recovery', JSON.stringify({ phase: 'prod', userId: 'prod-user' }));
+  });
+  const beforePreview = await page.evaluate(() => ({
+    root: localStorage.getItem('yimai_root_id'),
+    tree: localStorage.getItem('yimai_tree_id'),
+    recovery: localStorage.getItem('yimai_add_recovery'),
+    token: localStorage.getItem('yimai_token'),
+  }));
+
   await openPreview();
   await mobileOpenByName('林岚');
   await mobileAddRelative('儿子', '预览儿');
-  await page.evaluate(() => document.getElementById('m-btn-back-detail')?.click());
+  await page.evaluate(() => {
+    document.getElementById('m-btn-back-detail')?.click();
+  });
   await page.waitForSelector('#m-view-list:not([hidden])');
   await page.evaluate(() => document.getElementById('m-btn-overview')?.click());
   await page.waitForSelector('#m-view-overview:not([hidden])');
-  // production path still requires auth — open without token
+  const duringPreview = await page.evaluate(() => ({
+    root: localStorage.getItem('yimai_root_id'),
+    tree: localStorage.getItem('yimai_tree_id'),
+    recovery: localStorage.getItem('yimai_add_recovery'),
+    token: localStorage.getItem('yimai_token'),
+    isPreview: window.yimaiMobile?.isPreview?.(),
+  }));
+  await screenshot('INT-06-preview.png');
+
+  // Leave preview to formal /app/ in same browser — production pointers must survive.
+  await page.goto(`${BASE_URL}/app/`, { waitUntil: 'networkidle0' });
+  const afterPreview = await page.evaluate(() => ({
+    root: localStorage.getItem('yimai_root_id'),
+    tree: localStorage.getItem('yimai_tree_id'),
+    recovery: localStorage.getItem('yimai_add_recovery'),
+    token: localStorage.getItem('yimai_token'),
+  }));
+  await screenshot('INT-06-prod-auth.png');
+
   const prod = await page.evaluate(async () => {
     const res = await fetch(`${location.origin}/api/v1/persons`, { headers: { Accept: 'application/json' } });
     return res.status;
   });
-  await screenshot('INT-06-preview.png');
+
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-06-net.json'), JSON.stringify({
+    beforePreview, duringPreview, afterPreview, apiHits,
+  }, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-06-localstorage.json'), JSON.stringify({
+    beforePreview, duringPreview, afterPreview,
+  }, null, 2));
+
   const writes = apiHits.filter((h) => !['GET', 'HEAD', 'OPTIONS'].includes(h.method));
-  const ok = writes.length === 0 && prod === 401 && page.url().includes('preview=1');
-  log('INT-06', ok, JSON.stringify({ apiHits: apiHits.length, writes, prod }), {
-    fixture: 'preview-memory-林岚',
-  });
+  const pointersIntact = afterPreview.root === 'prod-root-sentinel'
+    && afterPreview.tree === 'prod-tree-sentinel'
+    && (afterPreview.recovery || '').includes('prod-user')
+    && duringPreview.root === 'prod-root-sentinel'
+    && duringPreview.tree === 'prod-tree-sentinel';
+  const ok = writes.length === 0 && prod === 401 && pointersIntact && duringPreview.isPreview === true;
+  log('INT-06', ok, JSON.stringify({
+    apiHits: apiHits.length, writes, prod, pointersIntact, duringPreview, afterPreview,
+  }), { fixture: 'preview-memory-林岚' });
 }
 
 async function testInt07Viewports() {
@@ -466,22 +760,60 @@ async function testInt07Viewports() {
   for (const vp of viewports) {
     await page.setViewport({ width: vp.w, height: vp.h });
     await mobileOpenByName('林岚');
-    const box = await page.evaluate(() => {
-      const add = document.getElementById('m-btn-add');
-      const r = add?.getBoundingClientRect();
-      return {
-        addVisible: Boolean(add) && (r?.width || 0) > 0 && (r?.height || 0) > 0,
-        name: document.getElementById('m-detail-name')?.textContent,
-        nameFont: document.getElementById('m-detail-name')
-          ? getComputedStyle(document.getElementById('m-detail-name')).fontSize
-          : null,
-      };
-    });
+    // Scroll CTA into view if needed, then require real visibility + clickability.
+    await page.evaluate(() => document.getElementById('m-btn-add')?.scrollIntoView({ block: 'nearest' }));
+    await sleep(100);
+    let probe = await probeAddVisibility();
+    if (!probe.inViewport) {
+      await page.evaluate(() => document.getElementById('m-btn-add')?.scrollIntoView({ block: 'center' }));
+      await sleep(100);
+      probe = await probeAddVisibility();
+    }
+    // Real click path — not only bbox.
+    let clicked = false;
+    if (probe.clickable && probe.inViewport) {
+      await page.click('#m-btn-add');
+      clicked = await page.evaluate(() => Boolean(document.getElementById('m-dlg-rel')?.open));
+      if (clicked) {
+        await page.evaluate(() => document.getElementById('m-rel-cancel')?.click());
+        await page.waitForFunction(() => !document.getElementById('m-dlg-rel')?.open);
+      }
+    }
     await screenshot(`INT-07-${vp.name}.png`);
-    reports.push({ ...vp, ...box });
+    // Also scroll-reach proof: list → detail CTA reachable.
+    await page.evaluate(() => {
+      window.yimaiMobile.showView('list');
+      window.yimaiMobile.sync();
+    });
+    await page.waitForSelector('#m-view-list:not([hidden])');
+    await mobileOpenByName('林岚');
+    await page.evaluate(() => {
+      const shell = document.getElementById('mobile-shell');
+      if (shell) shell.scrollTop = shell.scrollHeight;
+    });
+    await sleep(80);
+    const afterScroll = await probeAddVisibility();
+    reports.push({
+      ...vp,
+      ...probe,
+      clicked,
+      afterScrollInViewport: afterScroll.inViewport,
+      afterScrollClickable: afterScroll.clickable,
+    });
   }
   await page.setViewport({ width: 390, height: 844 });
-  const ok = reports.every((r) => r.addVisible && r.name === '林岚' && Number.parseFloat(r.nameFont) >= 28);
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-07-layout.json'), JSON.stringify(reports, null, 2));
+  const ok = reports.every((r) => (
+    r.ok && r.clicked && r.name === '林岚'
+    && Number.parseFloat(r.nameFontSize) >= 28
+    // System sans stack via --m-font; must not inherit desktop Noto Serif SC.
+    && /apple-system|BlinkMacSystemFont|Segoe UI|PingFang|Noto Sans|sans-serif/i.test(r.mFontVar || '')
+    && !/Noto Serif/i.test(r.nameFontFamily || '')
+    && !/Noto Serif/i.test(r.mFontVar || '')
+    && r.shellPosition === 'fixed'
+    && Math.abs(r.shellWidth - r.layoutWidth) < 2
+    && !r.desktopCover
+  ));
   log('INT-07', ok, JSON.stringify(reports), { account_id: auth.userId, tree_id: auth.treeId });
 }
 
@@ -489,75 +821,155 @@ async function testInt08ReduceMotionKeyboard() {
   const auth = seedLanFamily();
   await openAuthed(auth, auth.idLan);
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+  await page.evaluate(() => document.documentElement.classList.add('reduce-motion'));
   await mobileOpenByName('林岚');
   await page.evaluate(() => document.getElementById('m-btn-add').click());
   await page.waitForFunction(() => document.getElementById('m-dlg-rel')?.open);
-  // Tab to cancel
-  await page.keyboard.press('Tab');
-  await page.keyboard.press('Tab');
-  const active = await page.evaluate(() => document.activeElement?.id || document.activeElement?.textContent);
-  await page.click('#m-rel-cancel');
-  await page.waitForFunction(() => !document.getElementById('m-dlg-rel')?.open);
+
+  const focusTrail = [];
+  // Keyboard-only: Tab until cancel is focused, then activate with Enter (not mouse).
+  let landed = false;
+  for (let i = 0; i < 24; i += 1) {
+    const snap = await page.evaluate(() => ({
+      id: document.activeElement?.id || '',
+      text: (document.activeElement?.textContent || '').trim().slice(0, 40),
+      tag: document.activeElement?.tagName || '',
+    }));
+    focusTrail.push(snap);
+    if (snap.id === 'm-rel-cancel') {
+      landed = true;
+      break;
+    }
+    await page.keyboard.press('Tab');
+  }
+  await screenshot('INT-08-focus.png');
+  if (landed) {
+    await page.keyboard.press('Enter');
+  }
+  await page.waitForFunction(() => !document.getElementById('m-dlg-rel')?.open, { timeout: 5000 }).catch(() => {});
+  const closed = await page.evaluate(() => !document.getElementById('m-dlg-rel')?.open);
+  const reduceOn = await page.evaluate(() => (
+    document.documentElement.classList.contains('reduce-motion')
+    || matchMedia('(prefers-reduced-motion: reduce)').matches
+  ));
   await screenshot('INT-08-reduce.png');
-  const ok = !await page.evaluate(() => document.getElementById('m-dlg-rel')?.open);
-  log('INT-08', ok, JSON.stringify({ active }), { note: 'desktop keyboard / reduced-motion; not device soft keyboard' });
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-08-focus.json'), JSON.stringify({
+    focusTrail, landed, closed, reduceOn,
+  }, null, 2));
+  const ok = landed && closed && reduceOn
+    && focusTrail.some((f) => f.id === 'm-rel-cancel');
+  log('INT-08', ok, JSON.stringify({ landed, closed, reduceOn, focusTrail }), {
+    note: 'desktop keyboard + prefers-reduced-motion; not device soft keyboard',
+  });
 }
 
 async function testInt09AsyncIdentityGate() {
-  // Reuse existing delay hook pattern from regression if available; otherwise inject.
   const a = seedLanFamily();
   const b = phpSeed(`
 $u=App\\Models\\User::create(['name'=>'IsoB','email'=>$email,'password'=>bcrypt('password')]);
 $t=App\\Models\\Tree::create(['owner_user_id'=>$u->id,'title'=>'IsoB']);
 $p=App\\Models\\Person::create(['tree_id'=>$t->id,'name'=>'乙独','gender'=>'male','generation'=>1]);
-echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t')->plainTextToken,'idT'=>$p->id,'rootId'=>$p->id,'account_email'=>$email], JSON_UNESCAPED_UNICODE);
+echo json_encode(['userId'=>$u->id,'treeId'=>$t->id,'token'=>$u->createToken('t')->plainTextToken,'idT'=>$p->id,'rootId'=>$p->id,'account_email'=>$email,'password'=>'password'], JSON_UNESCAPED_UNICODE);
 `);
-  await openAuthed(a, a.idLan);
-  await page.evaluate((tokenA, tokenB, userB, treeB, rootB) => {
+
+  const netTrace = [];
+  page.removeAllListeners('request');
+  page.on('request', (req) => {
+    if (req.url().includes('/api/v1/')) {
+      netTrace.push({
+        ...sanitizeNet({ method: req.method(), url: req.url(), headers: req.headers() }),
+        at: new Date().toISOString(),
+        accountHint: req.headers().authorization ? '[bearer-present]' : '[no-auth]',
+      });
+    }
+  });
+
+  await productLogin(a.account_email, a.password);
+  await page.waitForFunction(() => (document.getElementById('m-list-rows')?.innerText || '').includes('林岚'), { timeout: 10000 });
+
+  // Arm delay on product loadTree's tree GET for account A (Authorization match), then kick loadTree.
+  await page.evaluate((tokenA) => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     window.__yimaiReleaseDelayedTree = () => release();
+    window.__yimaiDelayedTreeReleased = false;
+    window.__yimaiDelayedTreeHit = false;
     const originalFetch = window.fetch.bind(window);
     let armed = true;
     window.fetch = async (url, opts = {}) => {
       const u = String(url);
-      if (armed && /\/persons\/\d+\/tree/.test(u) && (opts.headers?.Authorization || '').includes(tokenA.slice(0, 10))) {
+      const auth = opts.headers?.Authorization || opts.headers?.authorization || '';
+      if (armed && /\/persons\/\d+\/tree/.test(u) && String(auth).includes(tokenA.slice(0, 12))) {
         armed = false;
+        window.__yimaiDelayedTreeHit = true;
         await gate;
+        window.__yimaiDelayedTreeReleased = true;
       }
       return originalFetch(url, opts);
     };
-    // kick a delayed tree load under A
-    window.__delayTreePromise = fetch(`${location.origin}/api/v1/persons/${localStorage.getItem('yimai_root_id')}/tree`, {
-      headers: { Accept: 'application/json', Authorization: `Bearer ${tokenA}` },
-    });
-    // switch to B
-    localStorage.setItem('yimai_token', tokenB);
-    localStorage.setItem('yimai_user_id', String(userB));
-    localStorage.setItem('yimai_tree_id', String(treeB));
-    localStorage.setItem('yimai_root_id', String(rootB));
-  }, a.token, b.token, b.userId, b.treeId, b.idT);
-  await page.reload({ waitUntil: 'networkidle0' });
-  await page.waitForFunction(() => (document.getElementById('m-list-rows')?.innerText || '').includes('乙独')
-    || (document.getElementById('stats')?.textContent || '').includes('位亲人'), { timeout: 10000 });
-  const mid = await page.evaluate(() => ({
-    names: window.yimaiMobile?.persons?.().map((p) => p.name) || [],
-    selected: window.yimaiMobile?.selectedId?.(),
-  }));
+  }, a.token);
+
+  // Kick product loadTree (in-flight A) without destroying the page.
+  const loadPromiseHandle = page.evaluate(() => window.yimaiMobile.loadTree());
+  await page.waitForFunction(() => window.__yimaiDelayedTreeHit === true, { timeout: 8000 });
+
+  // Page-local switch to B via product login() — no reload, A request stays alive.
+  await page.evaluate(() => {
+    const pw = document.getElementById('password');
+    const em = document.getElementById('email');
+    if (pw) pw.value = '';
+    if (em) em.value = '';
+  });
+  await page.click('#email', { clickCount: 3 });
+  await page.type('#email', b.account_email);
+  await page.click('#password', { clickCount: 3 });
+  await page.type('#password', b.password);
+  await page.click('#btn-login');
+  await page.waitForFunction(() => (document.getElementById('m-list-rows')?.innerText || '').includes('乙独'), { timeout: 15000 });
+  await page.evaluate(() => {
+    const pw = document.getElementById('password');
+    if (pw) pw.value = '';
+  });
+
+  const mid = await page.evaluate(() => window.yimaiMobile.stateSnap());
+  await screenshot('INT-09-gate-mid.png');
+
+  // Release A's delayed tree response; product gate must drop it.
   await page.evaluate(() => window.__yimaiReleaseDelayedTree?.());
-  await sleep(500);
+  await loadPromiseHandle.catch(() => {});
+  await sleep(600);
   const after = await page.evaluate(() => ({
-    names: window.yimaiMobile?.persons?.().map((p) => p.name) || [],
-    list: document.getElementById('m-list-rows')?.innerText || '',
+    ...window.yimaiMobile.stateSnap(),
+    delayedReleased: window.__yimaiDelayedTreeReleased === true,
+    delayedHit: window.__yimaiDelayedTreeHit === true,
   }));
   await screenshot('INT-09-gate.png');
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-09-api.json'), JSON.stringify({ mid, after, a: { userId: a.userId, treeId: a.treeId }, b: { userId: b.userId, treeId: b.treeId } }, null, 2));
-  const polluted = after.names.includes('林岚') || after.list.includes('林岚');
-  const ok = mid.names.includes('乙独') && !polluted;
+
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-09-api.json'), JSON.stringify({
+    mid,
+    after,
+    a: { userId: a.userId, treeId: a.treeId },
+    b: { userId: b.userId, treeId: b.treeId },
+  }, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-09-net.json'), JSON.stringify(netTrace, null, 2));
+
+  const polluted = (after.personNames || []).includes('林岚')
+    || (after.listText || '').includes('林岚')
+    || (after.detailName || '').includes('林岚')
+    || String(after.userId) === String(a.userId)
+    || String(after.treeId) === String(a.treeId);
+  const ok = mid.personNames.includes('乙独')
+    && after.personNames.includes('乙独')
+    && after.personNames.length === 1
+    && String(after.userId) === String(b.userId)
+    && String(after.treeId) === String(b.treeId)
+    && after.delayedHit
+    && after.delayedReleased
+    && !polluted;
   log('INT-09', ok, JSON.stringify({ mid, after, polluted }), {
     account_id: b.userId,
     tree_id: b.treeId,
-    note: 'A delayed tree must not paint into B',
+    note: 'product login + delayed product loadTree; no reload; A callback completed without polluting B',
   });
 }
 
@@ -565,7 +977,6 @@ async function testInt10BindFailedZeroExtraPost() {
   const auth = seedLanFamily();
   await openAuthed(auth, auth.idLan);
   await mobileOpenByName('林岚');
-  // Use desktop form path with hooks (same submitAdd) to preserve recovery contract.
   const trace = await page.evaluate(async () => {
     const posts = [];
     const patches = [];
@@ -579,7 +990,7 @@ async function testInt10BindFailedZeroExtraPost() {
         const clone = res.clone();
         let body = null;
         try { body = await clone.json(); } catch (_) {}
-        posts.push({ status: res.status, id: body?.id });
+        posts.push({ status: res.status, id: body?.id != null ? String(body.id) : null });
         return res;
       }
       if (failBind && m === 'PATCH' && /\/api\/v1\/persons\/\d+$/.test(u.replace(/\?.*$/, ''))) {
@@ -591,39 +1002,48 @@ async function testInt10BindFailedZeroExtraPost() {
       }
       if (m === 'PATCH' && /\/api\/v1\/persons\/\d+$/.test(u.replace(/\?.*$/, ''))) {
         const res = await originalFetch(url, opts);
-        patches.push({ status: res.status, url: u });
+        const idMatch = u.match(/\/persons\/(\d+)/);
+        patches.push({ status: res.status, url: u, id: idMatch ? idMatch[1] : null });
         return res;
       }
       return originalFetch(url, opts);
     };
-    // prepare son add via sheet
     const lan = window.yimaiMobile.persons().find((p) => p.name === '林岚');
     window.yimaiMobile.openPerson(lan.id);
     document.querySelector('#kin-grid button[data-kin="son"]')?.click();
     document.getElementById('add-name').value = '绑定败儿';
     document.getElementById('form-add').requestSubmit();
-    await new Promise((r) => setTimeout(r, 800));
+    await new Promise((r) => setTimeout(r, 900));
     const recovery = JSON.parse(localStorage.getItem('yimai_add_recovery') || 'null');
-    const createId = posts[0]?.id;
-    // retry submit without clearing recovery
+    const createId = posts[0]?.id != null ? String(posts[0].id) : null;
+    const pending = recovery?.pendingPersonId != null ? String(recovery.pendingPersonId) : null;
+    // Retry — must PATCH same pending id, zero extra persons POST.
     document.getElementById('form-add').requestSubmit();
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1200));
+    const recoveryAfter = JSON.parse(localStorage.getItem('yimai_add_recovery') || 'null');
+    const successPatch = patches.find((p) => p.status >= 200 && p.status < 300);
+    const retryId = successPatch?.id != null ? String(successPatch.id) : null;
     return {
-      posts: posts.map((p) => ({ status: p.status, id: p.id })),
+      posts,
       patches,
       recovery,
+      recoveryAfter,
       createId,
-      postsAfterFirst: posts.length,
+      pending,
+      retryId,
+      postsAfterCreate: posts.length,
+      successfulPatchCount: patches.filter((p) => p.status >= 200 && p.status < 300).length,
     };
   });
   await screenshot('INT-10-bindfail.png');
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-10-trace.json'), JSON.stringify(trace, null, 2));
-  const pending = trace.recovery?.pendingPersonId;
-  const ok = Number(trace.createId) === Number(pending)
-    && trace.posts.length === 1
-    && trace.patches.some((p) => p.status === 200 || p.status === 201 || true);
-  // stronger: posts stay 1
-  log('INT-10', Number(trace.createId) === Number(pending) && trace.posts.length === 1, JSON.stringify(trace), {
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-10-trace.json'), JSON.stringify(trace, null, 2));
+  const ok = Boolean(trace.createId)
+    && trace.createId === trace.pending
+    && trace.createId === trace.retryId
+    && trace.postsAfterCreate === 1
+    && trace.successfulPatchCount === 1
+    && Number(trace.posts[0]?.status) === 201;
+  log('INT-10', ok, JSON.stringify(trace), {
     account_id: auth.userId,
     tree_id: auth.treeId,
     target_id: auth.idLan,
@@ -631,23 +1051,15 @@ async function testInt10BindFailedZeroExtraPost() {
 }
 
 async function testInt11RegressionSuitePointer() {
-  // Run named existing suites as child processes and record named counts.
-  const suites = [
-    { name: 'frontend-regression', cmd: ['npm', 'run', 'test:frontend'], expect: 41 },
-    { name: 'delete-correction', cmd: ['npm', 'run', 'test:delete'], expect: null },
-    { name: 'delete-correction-qa-hardening', cmd: ['npm', 'run', 'test:delete-hardening'], expect: null },
-  ];
-  // Only point that suites must be run; actual execution happens in main after INT UI tests
-  // to keep one browser lifecycle. Mark as deferred runner result file.
   mark('INT-11', 'NOT RUN', 'executed in suite phase after UI cases', { deferred: true });
 }
 
 async function runNamedSuites() {
   const suiteResults = [];
   for (const suite of [
-    { id: 'REG-frontend', script: 'test:frontend' },
-    { id: 'DEL-delete', script: 'test:delete' },
-    { id: 'DEL-hardening', script: 'test:delete-hardening' },
+    { id: 'REG-frontend', script: 'test:frontend', expectPass: 41 },
+    { id: 'DEL-delete', script: 'test:delete', expectPass: 11 },
+    { id: 'DEL-hardening', script: 'test:delete-hardening', expectPass: 34 },
   ]) {
     const out = spawnSync('npm', ['run', suite.script], {
       cwd: APP_ROOT,
@@ -664,20 +1076,33 @@ async function runNamedSuites() {
       exit: out.status,
       passCount: passLines.length,
       failCount: failLines.length,
-      namedPassSample: passLines.slice(0, 20),
-      namedFailSample: failLines.slice(0, 20),
+      expectPass: suite.expectPass,
+      // Full named lines — not a 20-row sample.
+      namedPass: passLines,
+      namedFail: failLines,
     });
   }
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-11-suites.json'), JSON.stringify(suiteResults, null, 2));
-  // Replace deferred INT-11
   const idx = results.findIndex((r) => r.id === 'INT-11');
-  const allOk = suiteResults.every((s) => s.exit === 0 && s.failCount === 0);
+  const allOk = suiteResults.every((s) => (
+    s.exit === 0 && s.failCount === 0 && s.passCount === s.expectPass
+  ));
   const entry = {
     id: 'INT-11',
     status: allOk ? 'PASS' : 'observed FAIL',
-    message: JSON.stringify(suiteResults.map((s) => ({ id: s.id, exit: s.exit, passCount: s.passCount, failCount: s.failCount }))),
+    message: JSON.stringify(suiteResults.map((s) => ({
+      id: s.id, exit: s.exit, passCount: s.passCount, failCount: s.failCount, expectPass: s.expectPass,
+    }))),
     at: new Date().toISOString(),
-    suites: suiteResults,
+    suites: suiteResults.map((s) => ({
+      id: s.id,
+      exit: s.exit,
+      passCount: s.passCount,
+      failCount: s.failCount,
+      expectPass: s.expectPass,
+      namedPass: s.namedPass,
+      namedFail: s.namedFail,
+    })),
   };
   if (idx >= 0) results[idx] = entry;
   else results.push(entry);
@@ -686,7 +1111,6 @@ async function runNamedSuites() {
 }
 
 async function testInvalidIdSafeClose() {
-  // PM INT-2 coverage under INT-01 family of probes
   const auth = seedLanFamily();
   await openAuthed(auth, auth.idLan);
   await page.evaluate((deadId) => {
@@ -706,6 +1130,13 @@ async function testRecognizeExistingNoNewPerson() {
   const auth = seedLanFamily();
   await openAuthed(auth, auth.idLan);
   const before = await apiJson(auth.token, 'GET', '/persons');
+  const posts = [];
+  page.removeAllListeners('request');
+  page.on('request', (req) => {
+    if (req.method() === 'POST' && /\/api\/v1\/persons\/?$/.test(req.url().replace(/\?.*$/, ''))) {
+      posts.push(sanitizeNet({ method: req.method(), url: req.url(), headers: req.headers() }));
+    }
+  });
   await mobileOpenByName('林岚');
   await page.evaluate(() => document.getElementById('m-btn-add').click());
   await page.waitForFunction(() => document.getElementById('m-dlg-rel')?.open);
@@ -722,22 +1153,90 @@ async function testRecognizeExistingNoNewPerson() {
   });
   await page.evaluate(() => document.getElementById('m-form-name').requestSubmit());
   await page.waitForFunction(() => !document.getElementById('m-dlg-name')?.open, { timeout: 10000 });
+  await sleep(400);
   const after = await apiJson(auth.token, 'GET', '/persons');
   const tree = await apiJson(auth.token, 'GET', `/persons/${auth.idLan}/tree`);
-  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INT-PM3-existing.json'), JSON.stringify({ before: before.json, after: after.json, tree: tree.json }, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'api-json', 'INT-PM3-existing.json'), JSON.stringify({
+    before: before.json, after: after.json, tree: tree.json, posts,
+  }, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'network', 'INT-PM3-posts.json'), JSON.stringify(posts, null, 2));
   await screenshot('INT-PM3-existing.png');
   const ok = (before.json.data || []).length === (after.json.data || []).length
+    && posts.length === 0
     && (tree.json.edges || []).some((e) => e.type === 'sibling'
       && ((Number(e.a) === Number(auth.idLan) && Number(e.b) === Number(auth.idHe))
         || (Number(e.b) === Number(auth.idLan) && Number(e.a) === Number(auth.idHe))));
   log('INT-PM3-existing', ok, JSON.stringify({
     before: before.json.data.length,
     after: after.json.data.length,
+    posts: posts.length,
   }), { account_id: auth.userId, tree_id: auth.treeId, target_id: auth.idLan });
+}
+
+async function captureServedHashes() {
+  const assets = [
+    { url: `${BASE_URL}/app/`, name: 'served-index.html' },
+    { url: `${BASE_URL}/app/js/app.js`, name: 'served-app.js' },
+    { url: `${BASE_URL}/app/css/app.css`, name: 'served-app.css' },
+    { url: `${BASE_URL}/app/css/mobile.css`, name: 'served-mobile.css' },
+    { url: `${BASE_URL}/app/js/preview-fixture.js`, name: 'served-preview-fixture.js' },
+  ];
+  for (const asset of assets) {
+    const res = await fetch(asset.url);
+    const buf = Buffer.from(await res.arrayBuffer());
+    const hash = createHash('sha256').update(buf).digest('hex');
+    fs.writeFileSync(path.join(ARTIFACTS_DIR, `${asset.name}`), buf);
+    fs.writeFileSync(path.join(ARTIFACTS_DIR, `${asset.name}.sha256`), `${hash}\n`);
+  }
+  // Prove PHP controller is NOT publicly served.
+  const phpProbe = await fetch(`${BASE_URL}/app/../app/Http/Controllers/Api/V1/PersonController.php`).catch(() => null);
+  const phpStatus = phpProbe ? phpProbe.status : null;
+  const phpBody = phpProbe ? (await phpProbe.text()).slice(0, 200) : '';
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'served-php-probe.json'), JSON.stringify({
+    url: `${BASE_URL}/app/Http/Controllers/Api/V1/PersonController.php`,
+    alt: `${BASE_URL}/app/../app/Http/Controllers/Api/V1/PersonController.php`,
+    status: phpStatus,
+    bodyStartsWithPhp: phpBody.trimStart().startsWith('<?php'),
+    note: 'PHP source must not be publicly HTTP-served',
+  }, null, 2));
+}
+
+function mirrorEvidenceToStore() {
+  const copyRecursive = (src, dest) => {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+      const from = path.join(src, entry.name);
+      const to = path.join(dest, entry.name);
+      if (entry.isDirectory()) copyRecursive(from, to);
+      else fs.copyFileSync(from, to);
+    }
+  };
+  copyRecursive(ARTIFACTS_DIR, STORE_DIR);
 }
 
 async function main() {
   console.log('START hashes', START_HASHES);
+  console.log('EVIDENCE_STORE', STORE_DIR);
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'PROVENANCE-START.md'), [
+    '# PROVENANCE START',
+    '',
+    `- at: ${startedAt.toISOString()}`,
+    `- HEAD: ${START_HASHES.head}`,
+    `- dirty: ${START_HASHES.dirty ? START_HASHES.dirty : '(clean)'}`,
+    `- baseUrl: ${BASE_URL}`,
+    '',
+    '## source sha256',
+    ...Object.entries(START_HASHES).filter(([k]) => k.includes('/')).map(([k, v]) => `- ${k}: ${v}`),
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'SOURCE-HASHES-FIXED.txt'), [
+    `head=${START_HASHES.head}`,
+    `dirty=${START_HASHES.dirty}`,
+    ...Object.entries(START_HASHES).filter(([k]) => k.includes('/')).map(([k, v]) => `${k}=${v}`),
+    '',
+  ].join('\n'));
+
+  await captureServedHashes();
   await setup();
   try {
     await testInt01MainPath();
@@ -760,7 +1259,6 @@ async function main() {
     await browser?.close();
   }
 
-  // Suites need server; run after UI browser closed
   if (!fatalError && process.env.SKIP_SUITES !== '1') {
     try {
       await runNamedSuites();
@@ -783,6 +1281,7 @@ async function main() {
     startedAt: startedAt.toISOString(),
     finishedAt: new Date().toISOString(),
     baseUrl: BASE_URL,
+    evidenceStore: STORE_DIR,
     startHashes: START_HASHES,
     endHashes: END_HASHES,
     hashesUnchangedDuringRun: JSON.stringify(START_HASHES) === JSON.stringify(END_HASHES),
@@ -790,7 +1289,15 @@ async function main() {
     results,
   };
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INTEGRATION-QA-RESULTS.json'), JSON.stringify(summary, null, 2));
-  fs.writeFileSync(path.join(STORE_DIR, 'INTEGRATION-QA-RESULTS.json'), JSON.stringify(summary, null, 2));
+  fs.writeFileSync(path.join(ARTIFACTS_DIR, 'PROVENANCE-END.md'), [
+    '# PROVENANCE END',
+    '',
+    `- at: ${summary.finishedAt}`,
+    `- HEAD: ${END_HASHES.head}`,
+    `- dirty: ${END_HASHES.dirty ? END_HASHES.dirty : '(clean)'}`,
+    `- hashesUnchangedDuringRun: ${summary.hashesUnchangedDuringRun}`,
+    '',
+  ].join('\n'));
   const md = [
     '# Integration QA results',
     '',
@@ -798,13 +1305,14 @@ async function main() {
     `- HEAD: ${END_HASHES.head}`,
     `- dirty: ${END_HASHES.dirty ? 'YES' : 'clean'}`,
     `- hashes unchanged during run: ${summary.hashesUnchangedDuringRun}`,
+    `- evidence store: ${STORE_DIR}`,
     '',
     '| id | status | message |',
     '|---|---|---|',
     ...results.map((r) => `| ${r.id} | ${r.status} | ${(r.message || '').replace(/\|/g, '\\|').slice(0, 180)} |`),
   ].join('\n');
   fs.writeFileSync(path.join(ARTIFACTS_DIR, 'INTEGRATION-QA-RESULTS.md'), md);
-  fs.writeFileSync(path.join(STORE_DIR, 'INTEGRATION-QA-RESULTS.md'), md);
+  mirrorEvidenceToStore();
   console.log(md);
   if (fatalError || results.some((r) => r.status === 'observed FAIL')) process.exit(1);
 }
